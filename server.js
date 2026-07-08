@@ -21,6 +21,15 @@ app.get("/mlb", async (req, res) => {
 app.get("/", (req, res) => {
   res.send("MLB Stats API relay is running");
 });
+app.get("/test", async (req, res) => {
+  try {
+    const response = await fetch("https://example.com");
+    const text = await response.text();
+    res.send(text);
+  } catch (error) {
+    res.status(500).json({ error: "Outbound fetch FAILED" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`MLB API relay running on port ${PORT}`);
