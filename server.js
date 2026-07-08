@@ -30,11 +30,12 @@ app.get("/mlb", async (req, res) => {
   }
 });
 
-// Root route (optional)
+// Root route
 app.get("/", (req, res) => {
   res.send("DraftKings API relay is running");
 });
 
+// ⭐ FIXED PORT BINDING ⭐
 app.listen(PORT, () => {
   console.log(`DraftKings API relay running on port ${PORT}`);
 });
