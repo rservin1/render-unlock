@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// MLB route using MLB Stats API (works on Render)
+// MLB route using MLB Stats API (public, no key)
 app.get("/mlb", async (req, res) => {
   try {
     const response = await fetch(
@@ -17,10 +17,7 @@ app.get("/mlb", async (req, res) => {
   }
 });
 
-// Root route
-app.get("/", (req, res) => {
-  res.send("MLB Stats API relay is running");
-});
+// Outbound test route
 app.get("/test", async (req, res) => {
   try {
     const response = await fetch("https://example.com");
@@ -31,6 +28,12 @@ app.get("/test", async (req, res) => {
   }
 });
 
+// Root route
+app.get("/", (req, res) => {
+  res.send("MLB Stats API relay is running");
+});
+
+// Correct port binding for Render
 app.listen(PORT, () => {
   console.log(`MLB API relay running on port ${PORT}`);
 });
