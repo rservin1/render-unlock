@@ -4,36 +4,42 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// MLB route using MLB Stats API (public, no key)
+// Your ParlayAPI key
+const API_KEY = "74af42e4282185a2aa8618abc2889ad5";
+
+// MLB odds relay (ParlayAPI → Render → Power Query)
 app.get("/mlb", async (req, res) => {
   try {
-    const response = await fetch(
-      "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
-    );
+    const url =
+      "https://api.parlay-api.com/v1/sports/baseball_mlb/odds" +
+      `?apiKey=${API_KEY}` +
+      "&regions=us" +
+      "&markets=h2h,spreads,alternate_spreads,alternate_totals";
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: `ParlayAPI error ${response.status}`,
+      });
+    }
+
     const data = await response.json();
     res.json(data);
   } catch (error) {
-    res.status(500).json({ error: "Failed to fetch MLB data" });
-  }
-});
-
-// Outbound test route
-app.get("/test", async (req, res) => {
-  try {
-    const response = await fetch("https://example.com");
-    const text = await response.text();
-    res.send(text);
-  } catch (error) {
-    res.status(500).json({ error: "Outbound fetch FAILED" });
+    res.status(500).json({
+      error: "Failed to fetch MLB odds",
+      details: error.message,
+    });
   }
 });
 
 // Root route
 app.get("/", (req, res) => {
-  res.send("MLB Stats API relay is running");
+  res.send("MLB Odds API relay is running");
 });
 
-// Correct port binding for Render
+// Render port binding
 app.listen(PORT, () => {
-  console.log(`MLB API relay running on port ${PORT}`);
+  console.log(`MLB Odds API relay running on port ${PORT}`);
 });
