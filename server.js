@@ -5,7 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Your ParlayAPI key
-const API_KEY = "74af42e4282185a2aa8618abc2889ad5";
+const API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
 // MLB odds relay (ParlayAPI → Render → Power Query)
 app.get("/mlb", async (req, res) => {
