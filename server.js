@@ -2,7 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 // Your ParlayAPI key
 const API_KEY = "74af42e4282185a2aa8618abc2889ad5";
@@ -10,13 +10,12 @@ const API_KEY = "74af42e4282185a2aa8618abc2889ad5";
 // MLB odds relay (ParlayAPI → Render → Power Query)
 app.get("/mlb", async (req, res) => {
   try {
-    // FIX 1: Removed 'api.' subdomain from base URL
-    // FIX 2: Fixed 'markets' to only request core valid pre-game keys
+    // Correct base URL without the 'api.' subdomain
     const url =
       "https://parlay-api.com/v1/sports/baseball_mlb/odds" +
       `?apiKey=${API_KEY}` +
       "&regions=us" +
-      "&markets=h2h,spreads,totals"; 
+      "&markets=h2h,totals"; // Standardized to natively supported markets
 
     const response = await fetch(url);
 
