@@ -10,7 +10,8 @@ const API_KEY = "74af42e4282185a2aa8618abc2889ad5";
 app.get("/mlb", async (req, res) => {
   try {
     // We remove the limit or specific market filters if they were hiding games
-    const url = `https://parlay-api.com/v1/sports/baseball_mlb/odds?apiKey=${API_KEY}&regions=us&markets=h2h,totals`;
+    // Update this line inside your app.get("/mlb", ...) block
+const url = `https://parlay-api.com/v1/sports/baseball_mlb/odds?apiKey=${API_KEY}&regions=us&markets=h2h,totals`;
     
     console.log("--- DEBUGGING API CALL ---");
     const response = await fetch(url);
