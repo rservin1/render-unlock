@@ -5,16 +5,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Your ParlayAPI key
-const API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
+const API_KEY = "74af42e4282185a2aa8618abc2889ad5";
 
 // MLB odds relay (ParlayAPI → Render → Power Query)
 app.get("/mlb", async (req, res) => {
   try {
+    // FIX 1: Removed 'api.' subdomain from base URL
+    // FIX 2: Fixed 'markets' to only request core valid pre-game keys
     const url =
-      "https://api.parlay-api.com/v1/sports/baseball_mlb/odds" +
+      "https://parlay-api.com/v1/sports/baseball_mlb/odds" +
       `?apiKey=${API_KEY}` +
       "&regions=us" +
-      "&markets=h2h,spreads,alternate_spreads,alternate_totals";
+      "&markets=h2h,spreads,totals"; 
 
     const response = await fetch(url);
 
