@@ -7,13 +7,11 @@ const PORT = process.env.PORT || 10000;
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
-// Normalize team names for strict matching (removes spaces, punctuation, lowercase)
 function normalizeName(name) {
   if (!name) return "";
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Helper to fetch live official MLB game statuses & numeric gamePk map
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -38,6 +36,27 @@ async function getMlbScheduleMap() {
   } catch (err) {
     console.error("Error building MLB map:", err);
     return {};
+  }
+}
+
+// Helper to fetch Pitcher Hand and ERA in one lookup
+async function getPitcherInfo(pitcherId) {
+  if (!pitcherId) return { hand: "", era: "" };
+  try {
+    const url = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const person = data.people?.[0] || {};
+    const pitchHandCode = person.pitchHand?.code || "";
+    const handStr = pitchHandCode === "L" ? "LHP" : (pitchHandCode === "R" ? "RHP" : "");
+
+    const era = person.stats?.[0]?.splits?.[0]?.stat?.era || "";
+
+    return { hand: handStr, era: era };
+  } catch (err) {
+    console.error(`Error fetching info for pitcher ${pitcherId}:`, err);
+    return { hand: "", era: "" };
   }
 }
 
@@ -96,10 +115,7 @@ app.get("/mlb", async (req, res) => {
       const normHome = normalizeName(game.home_team);
       const matchedMlb = mlbMap[normHome];
 
-      // Use matched numeric gamePk if found, else fallback to Odds ID
       const officialGamePk = matchedMlb ? matchedMlb.gamePk : (game.id || "000000");
-
-      // Use live official status if matched, else fallback to score check
       const abstractState = matchedMlb ? matchedMlb.abstractState : (game.completed ? "Final" : (game.scores ? "Live" : "Preview"));
       const detailedState = matchedMlb ? matchedMlb.detailedState : (game.completed ? "Final" : (game.scores ? "In Progress" : "Scheduled"));
       const statusCode = matchedMlb ? matchedMlb.statusCode : (game.completed ? "F" : (game.scores ? "I" : "S"));
@@ -167,7 +183,7 @@ app.get("/mlb", async (req, res) => {
 app.get("/stats", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
-    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher(person),standings,linescore`;
+    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`;
 
     const mlbRes = await fetch(mlbUrl);
     const mlbData = await mlbRes.json();
@@ -180,33 +196,45 @@ app.get("/stats", async (req, res) => {
           const homeTeam = game.teams.home;
           const awayTeam = game.teams.away;
 
-          const homePitcher = homeTeam.probablePitcher || {};
-          const awayPitcher = awayTeam.probablePitcher || {};
+          const homePitcherRaw = homeTeam.probablePitcher || {};
+          const awayPitcherRaw = awayTeam.probablePitcher || {};
 
-          const homeCode = homePitcher.pitchHand ? homePitcher.pitchHand.code : (homePitcher.person?.pitchHand?.code || "U");
-          const awayCode = awayPitcher.pitchHand ? awayPitcher.pitchHand.code : (awayPitcher.person?.pitchHand?.code || "U");
+          // Parallel fetch for Pitcher Details (Hand & ERA)
+          const [homePInfo, awayPInfo] = await Promise.all([
+            getPitcherInfo(homePitcherRaw.id),
+            getPitcherInfo(awayPitcherRaw.id)
+          ]);
+
+          // Team Strings like: "Kansas City Royals (36-54)"
+          const homeWins = homeTeam.leagueRecord?.wins ?? 0;
+          const homeLosses = homeTeam.leagueRecord?.losses ?? 0;
+          const awayWins = awayTeam.leagueRecord?.wins ?? 0;
+          const awayLosses = awayTeam.leagueRecord?.losses ?? 0;
+
+          const homeTeamFormatted = `${homeTeam.team.name} (${homeWins}-${homeLosses})`;
+          const awayTeamFormatted = `${awayTeam.team.name} (${awayWins}-${awayLosses})`;
+
+          // Pitcher Strings like: "Noah Cameron (LHP, 5.04)" or "TBD"
+          let homePitcherFormatted = homePitcherRaw.fullName || "TBD";
+          if (homePitcherRaw.fullName && (homePInfo.hand || homePInfo.era)) {
+            const details = [homePInfo.hand, homePInfo.era].filter(Boolean).join(", ");
+            homePitcherFormatted = `${homePitcherRaw.fullName} (${details})`;
+          }
+
+          let awayPitcherFormatted = awayPitcherRaw.fullName || "TBD";
+          if (awayPitcherRaw.fullName && (awayPInfo.hand || awayPInfo.era)) {
+            const details = [awayPInfo.hand, awayPInfo.era].filter(Boolean).join(", ");
+            awayPitcherFormatted = `${awayPitcherRaw.fullName} (${details})`;
+          }
 
           matchups.push({
             gamePk: game.gamePk.toString(),
             gameDate: game.gameDate,
             status: game.status.detailedState,
-            
-            home_team: homeTeam.team.name,
-            home_wins: homeTeam.leagueRecord ? homeTeam.leagueRecord.wins : 0,
-            home_losses: homeTeam.leagueRecord ? homeTeam.leagueRecord.losses : 0,
-            home_pct: homeTeam.leagueRecord ? homeTeam.leagueRecord.pct : ".000",
-            home_starter_name: homePitcher.fullName || "TBD",
-            home_starter_id: homePitcher.id || null,
-            home_starter_hand: homeCode === "L" ? "LHP" : (homeCode === "R" ? "RHP" : "Unknown"),
-
-            away_team: awayTeam.team.name,
-            away_wins: awayTeam.leagueRecord ? awayTeam.leagueRecord.wins : 0,
-            away_losses: awayTeam.leagueRecord ? awayTeam.leagueRecord.losses : 0,
-            away_pct: awayTeam.leagueRecord ? awayTeam.leagueRecord.pct : ".000",
-            away_starter_name: awayPitcher.fullName || "TBD",
-            away_starter_id: awayPitcher.id || null,
-            away_starter_hand: awayCode === "L" ? "LHP" : (awayCode === "R" ? "RHP" : "Unknown"),
-
+            home_team: homeTeamFormatted,
+            away_team: awayTeamFormatted,
+            home_pitcher: homePitcherFormatted,
+            away_pitcher: awayPitcherFormatted,
             venue: game.venue ? game.venue.name : "Unknown"
           });
         }
