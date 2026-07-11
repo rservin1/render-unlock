@@ -39,25 +39,23 @@ async function getMlbScheduleMap() {
   }
 }
 
-// Helper to fetch Pitcher Hand and ERA in one lookup
-async function getPitcherInfo(pitcherId) {
-  if (!pitcherId) return { hand: "", era: "" };
-  try {
-    const url = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
-    const res = await fetch(url);
-    const data = await res.json();
+// Helper to format Pitcher: "Name (LHP, 3.45)"
+function formatPitcher(pitcherObj) {
+  if (!pitcherObj || !pitcherObj.fullName) return "TBD";
 
-    const person = data.people?.[0] || {};
-    const pitchHandCode = person.pitchHand?.code || "";
-    const handStr = pitchHandCode === "L" ? "LHP" : (pitchHandCode === "R" ? "RHP" : "");
+  const name = pitcherObj.fullName;
+  const handCode = pitcherObj.pitchHand?.code || pitcherObj.person?.pitchHand?.code || "";
+  const handStr = handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : "");
 
-    const era = person.stats?.[0]?.splits?.[0]?.stat?.era || "";
-
-    return { hand: handStr, era: era };
-  } catch (err) {
-    console.error(`Error fetching info for pitcher ${pitcherId}:`, err);
-    return { hand: "", era: "" };
+  // Extract ERA from hydrated stats
+  let era = "";
+  if (Array.isArray(pitcherObj.stats)) {
+    const pitchingStat = pitcherObj.stats.find(s => s.group?.displayName === "pitching" || s.type?.displayName === "season");
+    era = pitchingStat?.splits?.[0]?.stat?.era || "";
   }
+
+  const details = [handStr, era].filter(Boolean).join(", ");
+  return details ? `${name} (${details})` : name;
 }
 
 // ==========================================
@@ -183,7 +181,9 @@ app.get("/mlb", async (req, res) => {
 app.get("/stats", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
-    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`;
+    
+    // Fetch schedule + pitchers + handedness + ERAs in ONE request
+    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher(person,stats(group=[pitching],type=[season]))`;
 
     const mlbRes = await fetch(mlbUrl);
     const mlbData = await mlbRes.json();
@@ -196,16 +196,7 @@ app.get("/stats", async (req, res) => {
           const homeTeam = game.teams.home;
           const awayTeam = game.teams.away;
 
-          const homePitcherRaw = homeTeam.probablePitcher || {};
-          const awayPitcherRaw = awayTeam.probablePitcher || {};
-
-          // Parallel fetch for Pitcher Details (Hand & ERA)
-          const [homePInfo, awayPInfo] = await Promise.all([
-            getPitcherInfo(homePitcherRaw.id),
-            getPitcherInfo(awayPitcherRaw.id)
-          ]);
-
-          // Team Strings like: "Kansas City Royals (36-54)"
+          // Format Team + Record: "Kansas City Royals (36-54)"
           const homeWins = homeTeam.leagueRecord?.wins ?? 0;
           const homeLosses = homeTeam.leagueRecord?.losses ?? 0;
           const awayWins = awayTeam.leagueRecord?.wins ?? 0;
@@ -214,28 +205,16 @@ app.get("/stats", async (req, res) => {
           const homeTeamFormatted = `${homeTeam.team.name} (${homeWins}-${homeLosses})`;
           const awayTeamFormatted = `${awayTeam.team.name} (${awayWins}-${awayLosses})`;
 
-          // Pitcher Strings like: "Noah Cameron (LHP, 5.04)" or "TBD"
-          let homePitcherFormatted = homePitcherRaw.fullName || "TBD";
-          if (homePitcherRaw.fullName && (homePInfo.hand || homePInfo.era)) {
-            const details = [homePInfo.hand, homePInfo.era].filter(Boolean).join(", ");
-            homePitcherFormatted = `${homePitcherRaw.fullName} (${details})`;
-          }
-
-          let awayPitcherFormatted = awayPitcherRaw.fullName || "TBD";
-          if (awayPitcherRaw.fullName && (awayPInfo.hand || awayPInfo.era)) {
-            const details = [awayPInfo.hand, awayPInfo.era].filter(Boolean).join(", ");
-            awayPitcherFormatted = `${awayPitcherRaw.fullName} (${details})`;
-          }
+          // Format Pitcher + Hand + ERA: "Noah Cameron (LHP, 5.04)"
+          const homePitcherFormatted = formatPitcher(homeTeam.probablePitcher);
+          const awayPitcherFormatted = formatPitcher(awayTeam.probablePitcher);
 
           matchups.push({
             gamePk: game.gamePk.toString(),
-            gameDate: game.gameDate,
-            status: game.status.detailedState,
             home_team: homeTeamFormatted,
             away_team: awayTeamFormatted,
             home_pitcher: homePitcherFormatted,
-            away_pitcher: awayPitcherFormatted,
-            venue: game.venue ? game.venue.name : "Unknown"
+            away_pitcher: awayPitcherFormatted
           });
         }
       }
