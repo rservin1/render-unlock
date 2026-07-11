@@ -4,28 +4,39 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// API Keys
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
-// Helper function to build a map of Home Team Name -> Official MLB gamePk
-async function getMlbGamePkMap() {
+// Normalize team names for strict matching (removes spaces, punctuation, lowercase)
+function normalizeName(name) {
+  if (!name) return "";
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Helper to fetch live official MLB game statuses & numeric gamePk map
+async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
     const res = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`);
     const data = await res.json();
     
-    const pkMap = {};
+    const map = {};
     if (data.dates && data.dates.length > 0) {
       data.dates[0].games.forEach((g) => {
         if (g.teams && g.teams.home && g.teams.home.team) {
-          pkMap[g.teams.home.team.name.trim()] = g.gamePk;
+          const normHome = normalizeName(g.teams.home.team.name);
+          map[normHome] = {
+            gamePk: g.gamePk.toString(),
+            abstractState: g.status.abstractGameState,
+            detailedState: g.status.detailedState,
+            statusCode: g.status.statusCode
+          };
         }
       });
     }
-    return pkMap;
+    return map;
   } catch (err) {
-    console.error("Error building MLB gamePk map:", err);
+    console.error("Error building MLB map:", err);
     return {};
   }
 }
@@ -35,10 +46,10 @@ async function getMlbGamePkMap() {
 // ==========================================
 app.get("/mlb", async (req, res) => {
   try {
-    const [oddsRes, parlayRes, mlbPkMap] = await Promise.allSettled([
+    const [oddsRes, parlayRes, mlbMapRes] = await Promise.allSettled([
       fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
       fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`),
-      getMlbGamePkMap()
+      getMlbScheduleMap()
     ]);
 
     let oddsData = [];
@@ -51,7 +62,7 @@ app.get("/mlb", async (req, res) => {
       parlayData = await parlayRes.value.json().catch(() => null);
     }
 
-    const gameMap = mlbPkMap.status === "fulfilled" ? mlbPkMap.value : {};
+    const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
 
     if (!Array.isArray(oddsData)) {
       return res.status(400).json({ error: "Odds API Error", details: oddsData });
@@ -82,10 +93,16 @@ app.get("/mlb", async (req, res) => {
         ? parlayData.find((p) => p.home_team === game.home_team || p.id === game.id) || null
         : null;
 
-      const cleanHomeName = game.home_team ? game.home_team.trim() : "";
-      
-      // Assign official numeric gamePk if matched, otherwise fallback to Odds API hash ID
-      const officialGamePk = gameMap[cleanHomeName] ? gameMap[cleanHomeName].toString() : (game.id || "000000");
+      const normHome = normalizeName(game.home_team);
+      const matchedMlb = mlbMap[normHome];
+
+      // Use matched numeric gamePk if found, else fallback to Odds ID
+      const officialGamePk = matchedMlb ? matchedMlb.gamePk : (game.id || "000000");
+
+      // Use live official status if matched, else fallback to score check
+      const abstractState = matchedMlb ? matchedMlb.abstractState : (game.completed ? "Final" : (game.scores ? "Live" : "Preview"));
+      const detailedState = matchedMlb ? matchedMlb.detailedState : (game.completed ? "Final" : (game.scores ? "In Progress" : "Scheduled"));
+      const statusCode = matchedMlb ? matchedMlb.statusCode : (game.completed ? "F" : (game.scores ? "I" : "S"));
 
       const formattedGame = {
         gamePk: officialGamePk,
@@ -96,9 +113,9 @@ app.get("/mlb", async (req, res) => {
         dayNight: "day",
         scheduledInnings: 9,
         status: {
-          abstractGameState: game.completed ? "Final" : (game.scores ? "Live" : "Preview"),
-          detailedState: game.completed ? "Final" : (game.scores ? "In Progress" : "Scheduled"),
-          statusCode: game.completed ? "F" : (game.scores ? "I" : "S")
+          abstractGameState: abstractState,
+          detailedState: detailedState,
+          statusCode: statusCode
         },
         teams: {
           away: {
@@ -114,13 +131,13 @@ app.get("/mlb", async (req, res) => {
             isWinner: homeWinner,
             team: {
               id: game.home_team || "Home",
-              name: cleanHomeName || "Home Team"
+              name: game.home_team ? game.home_team.trim() : "Home Team"
             }
           }
         },
         venue: {
           id: 0,
-          name: cleanHomeName ? `${cleanHomeName} Stadium` : "MLB Venue"
+          name: game.home_team ? `${game.home_team.trim()} Stadium` : "MLB Venue"
         },
         parlayData: parlayInfo
       };
@@ -150,8 +167,6 @@ app.get("/mlb", async (req, res) => {
 app.get("/stats", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
-    
-    // Hydrate probablePitcher(person) to get pitching handedness (pitchHand/throwArm)
     const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher(person),standings,linescore`;
 
     const mlbRes = await fetch(mlbUrl);
@@ -168,7 +183,6 @@ app.get("/stats", async (req, res) => {
           const homePitcher = homeTeam.probablePitcher || {};
           const awayPitcher = awayTeam.probablePitcher || {};
 
-          // Determine handedness (LHP / RHP / Unknown)
           const homeCode = homePitcher.pitchHand ? homePitcher.pitchHand.code : (homePitcher.person?.pitchHand?.code || "U");
           const awayCode = awayPitcher.pitchHand ? awayPitcher.pitchHand.code : (awayPitcher.person?.pitchHand?.code || "U");
 
@@ -177,7 +191,6 @@ app.get("/stats", async (req, res) => {
             gameDate: game.gameDate,
             status: game.status.detailedState,
             
-            // Home Team Details
             home_team: homeTeam.team.name,
             home_wins: homeTeam.leagueRecord ? homeTeam.leagueRecord.wins : 0,
             home_losses: homeTeam.leagueRecord ? homeTeam.leagueRecord.losses : 0,
@@ -186,7 +199,6 @@ app.get("/stats", async (req, res) => {
             home_starter_id: homePitcher.id || null,
             home_starter_hand: homeCode === "L" ? "LHP" : (homeCode === "R" ? "RHP" : "Unknown"),
 
-            // Away Team Details
             away_team: awayTeam.team.name,
             away_wins: awayTeam.leagueRecord ? awayTeam.leagueRecord.wins : 0,
             away_losses: awayTeam.leagueRecord ? awayTeam.leagueRecord.losses : 0,
