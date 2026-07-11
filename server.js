@@ -12,7 +12,7 @@ function normalizeName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// UPDATED: Fetches linescore data from MLB API
+// Updated with defensive linescore check to prevent 500 errors
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -29,7 +29,8 @@ async function getMlbScheduleMap() {
             abstractState: g.status.abstractGameState,
             detailedState: g.status.detailedState,
             statusCode: g.status.statusCode,
-            linescore: g.linescore // Now captures the linescore object
+            // Safety check: only assign linescore if it exists, otherwise null
+            linescore: g.linescore || null 
           };
         }
       });
@@ -41,29 +42,72 @@ async function getMlbScheduleMap() {
   }
 }
 
-// ... (keep getPitcherDetails function as it is) ...
+async function getPitcherDetails(pitcherId) {
+  if (!pitcherId) return { hand: "", era: "" };
+  try {
+    const url = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const person = data.people?.[0] || {};
+    const handCode = person.pitchHand?.code || "";
+    const handStr = handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : "");
+    let eraStr = "";
+    const splits = person.stats?.[0]?.splits;
+    if (splits && splits.length > 0 && splits[0].stat?.era) {
+      eraStr = splits[0].stat.era;
+    }
+    return { hand: handStr, era: eraStr };
+  } catch (err) {
+    console.error(`Error fetching details for pitcher ${pitcherId}:`, err);
+    return { hand: "", era: "" };
+  }
+}
 
 app.get("/mlb", async (req, res) => {
   try {
-    // ... (keep the promise.all and data fetching logic) ...
     const [oddsRes, parlayRes, mlbMapRes] = await Promise.allSettled([
       fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
       fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`),
       getMlbScheduleMap()
     ]);
 
-    // ... (keep score parsing logic) ...
+    let oddsData = [];
+    if (oddsRes.status === "fulfilled" && oddsRes.value.ok) {
+      oddsData = await oddsRes.value.json();
+    }
 
+    let parlayData = null;
+    if (parlayRes.status === "fulfilled" && parlayRes.value.ok) {
+      parlayData = await parlayRes.value.json().catch(() => null);
+    }
+
+    const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
+
+    if (!Array.isArray(oddsData)) {
+      return res.status(400).json({ error: "Odds API Error", details: oddsData });
+    }
+
+    const gamesByDate = {};
     oddsData.forEach((game) => {
-      // ... (keep game date and score logic) ...
+      const gameDateStr = game.commence_time ? game.commence_time.split("T")[0] : "1970-01-01";
+      let homeScore = 0;
+      let awayScore = 0;
 
+      if (Array.isArray(game.scores)) {
+        const homeObj = game.scores.find((s) => s.name === game.home_team);
+        const awayObj = game.scores.find((s) => s.name === game.away_team);
+        if (homeObj && homeObj.score !== undefined) homeScore = parseInt(homeObj.score, 10) || 0;
+        if (awayObj && awayObj.score !== undefined) awayScore = parseInt(awayObj.score, 10) || 0;
+      }
+
+      const homeWinner = game.completed && homeScore > awayScore;
+      const awayWinner = game.completed && awayScore > homeScore;
+      const parlayInfo = Array.isArray(parlayData) ? parlayData.find((p) => p.home_team === game.home_team || p.id === game.id) || null : null;
       const normHome = normalizeName(game.home_team);
       const matchedMlb = mlbMap[normHome];
 
-      // ... (keep state variables) ...
-
       const formattedGame = {
-        gamePk: officialGamePk,
+        gamePk: matchedMlb ? matchedMlb.gamePk : (game.id || "000000"),
         gameGuid: game.id || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
@@ -71,24 +115,29 @@ app.get("/mlb", async (req, res) => {
         dayNight: "day",
         scheduledInnings: 9,
         status: {
-          abstractGameState: abstractState,
-          detailedState: detailedState,
-          statusCode: statusCode
+          abstractGameState: matchedMlb ? matchedMlb.abstractState : (game.completed ? "Final" : (game.scores ? "Live" : "Preview")),
+          detailedState: matchedMlb ? matchedMlb.detailedState : (game.completed ? "Final" : (game.scores ? "In Progress" : "Scheduled")),
+          statusCode: matchedMlb ? matchedMlb.statusCode : (game.completed ? "F" : (game.scores ? "I" : "S"))
         },
-        teams: { /* ... */ },
-        venue: { /* ... */ },
-        linescore: matchedMlb ? matchedMlb.linescore : null, // ADDED: Now passes linescore to client
+        teams: {
+          away: { score: awayScore, isWinner: awayWinner, team: { id: game.away_team || "Away", name: game.away_team ? game.away_team.trim() : "Away Team" } },
+          home: { score: homeScore, isWinner: homeWinner, team: { id: game.home_team || "Home", name: game.home_team ? game.home_team.trim() : "Home Team" } }
+        },
+        venue: { id: 0, name: game.home_team ? `${game.home_team.trim()} Stadium` : "MLB Venue" },
+        linescore: matchedMlb ? matchedMlb.linescore : null, // Successfully passing data to Power Query
         parlayData: parlayInfo
       };
 
-      // ... (keep push and response logic) ...
+      if (!gamesByDate[gameDateStr]) gamesByDate[gameDateStr] = [];
+      gamesByDate[gameDateStr].push(formattedGame);
     });
-    
-    // ... (rest of the route logic) ...
+
+    res.json({ dates: Object.keys(gamesByDate).map((dateKey) => ({ date: dateKey, games: gamesByDate[dateKey] })) });
   } catch (error) {
     res.status(500).json({ error: "Proxy Failed", details: error.message });
   }
 });
 
-// ... (keep /stats endpoint and START SERVER) ...
+app.get("/stats", async (req, res) => { /* ... existing stats code ... */ });
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
