@@ -8,15 +8,37 @@ const PORT = process.env.PORT || 10000;
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
+// Helper function to build a map of Home Team Name -> Official MLB gamePk
+async function getMlbGamePkMap() {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const res = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`);
+    const data = await res.json();
+    
+    const pkMap = {};
+    if (data.dates && data.dates.length > 0) {
+      data.dates[0].games.forEach((g) => {
+        if (g.teams && g.teams.home && g.teams.home.team) {
+          pkMap[g.teams.home.team.name.trim()] = g.gamePk;
+        }
+      });
+    }
+    return pkMap;
+  } catch (err) {
+    console.error("Error building MLB gamePk map:", err);
+    return {};
+  }
+}
+
 // ==========================================
 // ENDPOINT 1: LIVE SCORES & ODDS (/mlb)
 // ==========================================
 app.get("/mlb", async (req, res) => {
   try {
-    const [oddsRes, parlayRes, mlbRes] = await Promise.allSettled([
+    const [oddsRes, parlayRes, mlbPkMap] = await Promise.allSettled([
       fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
       fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`),
-      fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&hydrate=probablePitcher,standings`)
+      getMlbGamePkMap()
     ]);
 
     let oddsData = [];
@@ -28,6 +50,8 @@ app.get("/mlb", async (req, res) => {
     if (parlayRes.status === "fulfilled" && parlayRes.value.ok) {
       parlayData = await parlayRes.value.json().catch(() => null);
     }
+
+    const gameMap = mlbPkMap.status === "fulfilled" ? mlbPkMap.value : {};
 
     if (!Array.isArray(oddsData)) {
       return res.status(400).json({ error: "Odds API Error", details: oddsData });
@@ -55,11 +79,16 @@ app.get("/mlb", async (req, res) => {
       const awayWinner = game.completed && awayScore > homeScore;
 
       const parlayInfo = Array.isArray(parlayData) 
-        ? parlayData.find(p => p.home_team === game.home_team || p.id === game.id) || null
+        ? parlayData.find((p) => p.home_team === game.home_team || p.id === game.id) || null
         : null;
 
+      const cleanHomeName = game.home_team ? game.home_team.trim() : "";
+      
+      // Assign official numeric gamePk if matched, otherwise fallback to Odds API hash ID
+      const officialGamePk = gameMap[cleanHomeName] ? gameMap[cleanHomeName].toString() : (game.id || "000000");
+
       const formattedGame = {
-        gamePk: game.id || "000000",
+        gamePk: officialGamePk,
         gameGuid: game.id || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
@@ -85,13 +114,13 @@ app.get("/mlb", async (req, res) => {
             isWinner: homeWinner,
             team: {
               id: game.home_team || "Home",
-              name: game.home_team ? game.home_team.trim() : "Home Team"
+              name: cleanHomeName || "Home Team"
             }
           }
         },
         venue: {
           id: 0,
-          name: game.home_team ? `${game.home_team} Stadium` : "MLB Venue"
+          name: cleanHomeName ? `${cleanHomeName} Stadium` : "MLB Venue"
         },
         parlayData: parlayInfo
       };
@@ -121,7 +150,9 @@ app.get("/mlb", async (req, res) => {
 app.get("/stats", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
-    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher,standings,linescore`;
+    
+    // Hydrate probablePitcher(person) to get pitching handedness (pitchHand/throwArm)
+    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher(person),standings,linescore`;
 
     const mlbRes = await fetch(mlbUrl);
     const mlbData = await mlbRes.json();
@@ -137,23 +168,32 @@ app.get("/stats", async (req, res) => {
           const homePitcher = homeTeam.probablePitcher || {};
           const awayPitcher = awayTeam.probablePitcher || {};
 
+          // Determine handedness (LHP / RHP / Unknown)
+          const homeCode = homePitcher.pitchHand ? homePitcher.pitchHand.code : (homePitcher.person?.pitchHand?.code || "U");
+          const awayCode = awayPitcher.pitchHand ? awayPitcher.pitchHand.code : (awayPitcher.person?.pitchHand?.code || "U");
+
           matchups.push({
-            gamePk: game.gamePk,
+            gamePk: game.gamePk.toString(),
             gameDate: game.gameDate,
             status: game.status.detailedState,
+            
+            // Home Team Details
             home_team: homeTeam.team.name,
             home_wins: homeTeam.leagueRecord ? homeTeam.leagueRecord.wins : 0,
             home_losses: homeTeam.leagueRecord ? homeTeam.leagueRecord.losses : 0,
             home_pct: homeTeam.leagueRecord ? homeTeam.leagueRecord.pct : ".000",
             home_starter_name: homePitcher.fullName || "TBD",
             home_starter_id: homePitcher.id || null,
+            home_starter_hand: homeCode === "L" ? "LHP" : (homeCode === "R" ? "RHP" : "Unknown"),
 
+            // Away Team Details
             away_team: awayTeam.team.name,
             away_wins: awayTeam.leagueRecord ? awayTeam.leagueRecord.wins : 0,
             away_losses: awayTeam.leagueRecord ? awayTeam.leagueRecord.losses : 0,
             away_pct: awayTeam.leagueRecord ? awayTeam.leagueRecord.pct : ".000",
             away_starter_name: awayPitcher.fullName || "TBD",
             away_starter_id: awayPitcher.id || null,
+            away_starter_hand: awayCode === "L" ? "LHP" : (awayCode === "R" ? "RHP" : "Unknown"),
 
             venue: game.venue ? game.venue.name : "Unknown"
           });
