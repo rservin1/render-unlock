@@ -20,22 +20,16 @@ app.get("/mlb", async (req, res) => {
     const gamesByDate = {};
 
     oddsData.forEach((game) => {
-      // 1. Convert UTC string to Date object
-      const utcDate = new Date(game.commence_time);
-
-      // 2. Hardcode offset to fixed MST (UTC - 7 Hours)
-      const mstDate = new Date(utcDate.getTime() - (7 * 60 * 60 * 1000));
-
-      // 3. Format into local ISO string (YYYY-MM-DDTHH:mm:ss) without 'Z'
-      const formattedMstString = mstDate.toISOString().replace("Z", "");
-      const gameDateStr = formattedMstString.split("T")[0];
+      const gameDateStr = game.commence_time 
+        ? game.commence_time.split("T")[0] 
+        : "1970-01-01";
 
       const formattedGame = {
         gamePk: game.id || "000000",
         gameGuid: game.id || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
-        gameDate: formattedMstString, // Pre-converted MST DateTime string
+        gameDate: game.commence_time || "",
         dayNight: "day",
         scheduledInnings: 9,
         status: {
@@ -49,7 +43,7 @@ app.get("/mlb", async (req, res) => {
             isWinner: false,
             team: {
               id: game.away_team || "Away",
-              name: game.away_team || "Away Team"
+              name: game.away_team ? game.away_team.trim() : "Away Team"
             }
           },
           home: {
@@ -57,7 +51,7 @@ app.get("/mlb", async (req, res) => {
             isWinner: false,
             team: {
               id: game.home_team || "Home",
-              name: game.home_team || "Home Team"
+              name: game.home_team ? game.home_team.trim() : "Home Team"
             }
           }
         },
