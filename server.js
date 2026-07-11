@@ -8,31 +8,25 @@ const PORT = process.env.PORT || 10000;
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
+// ==========================================
+// ENDPOINT 1: LIVE SCORES & ODDS (/mlb)
+// ==========================================
 app.get("/mlb", async (req, res) => {
   try {
-    // Fetch Odds API, ParlayAPI, and official MLB Stats API concurrently
     const [oddsRes, parlayRes, mlbRes] = await Promise.allSettled([
       fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
       fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`),
       fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&hydrate=probablePitcher,standings`)
     ]);
 
-    // Parse Odds API Payload
     let oddsData = [];
     if (oddsRes.status === "fulfilled" && oddsRes.value.ok) {
       oddsData = await oddsRes.value.json();
     }
 
-    // Parse ParlayAPI Payload
     let parlayData = null;
     if (parlayRes.status === "fulfilled" && parlayRes.value.ok) {
       parlayData = await parlayRes.value.json().catch(() => null);
-    }
-
-    // Parse Official MLB Stats API Payload (Probable Pitchers & Standings)
-    let mlbData = null;
-    if (mlbRes.status === "fulfilled" && mlbRes.value.ok) {
-      mlbData = await mlbRes.value.json().catch(() => null);
     }
 
     if (!Array.isArray(oddsData)) {
@@ -46,7 +40,6 @@ app.get("/mlb", async (req, res) => {
         ? game.commence_time.split("T")[0] 
         : "1970-01-01";
 
-      // Parse Live/Completed Scores
       let homeScore = 0;
       let awayScore = 0;
 
@@ -61,12 +54,10 @@ app.get("/mlb", async (req, res) => {
       const homeWinner = game.completed && homeScore > awayScore;
       const awayWinner = game.completed && awayScore > homeScore;
 
-      // Extract matching ParlayAPI data
       const parlayInfo = Array.isArray(parlayData) 
         ? parlayData.find(p => p.home_team === game.home_team || p.id === game.id) || null
         : null;
 
-      // Build Game Record
       const formattedGame = {
         gamePk: game.id || "000000",
         gameGuid: game.id || "",
@@ -111,18 +102,70 @@ app.get("/mlb", async (req, res) => {
       gamesByDate[gameDateStr].push(formattedGame);
     });
 
-    const formattedPayload = {
+    res.json({
       dates: Object.keys(gamesByDate).map((dateKey) => ({
         date: dateKey,
         games: gamesByDate[dateKey]
       }))
-    };
-
-    res.json(formattedPayload);
+    });
 
   } catch (error) {
     console.error("Proxy Error:", error);
     res.status(500).json({ error: "Proxy Failed", details: error.message });
+  }
+});
+
+// ==========================================
+// ENDPOINT 2: HISTORICAL TRENDS & MATCHUPS (/stats)
+// ==========================================
+app.get("/stats", async (req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher,standings,linescore`;
+
+    const mlbRes = await fetch(mlbUrl);
+    const mlbData = await mlbRes.json();
+
+    const matchups = [];
+
+    if (mlbData.dates && mlbData.dates.length > 0) {
+      for (const dateObj of mlbData.dates) {
+        for (const game of dateObj.games) {
+          const homeTeam = game.teams.home;
+          const awayTeam = game.teams.away;
+
+          const homePitcher = homeTeam.probablePitcher || {};
+          const awayPitcher = awayTeam.probablePitcher || {};
+
+          matchups.push({
+            gamePk: game.gamePk,
+            gameDate: game.gameDate,
+            status: game.status.detailedState,
+            home_team: homeTeam.team.name,
+            home_wins: homeTeam.leagueRecord ? homeTeam.leagueRecord.wins : 0,
+            home_losses: homeTeam.leagueRecord ? homeTeam.leagueRecord.losses : 0,
+            home_pct: homeTeam.leagueRecord ? homeTeam.leagueRecord.pct : ".000",
+            home_starter_name: homePitcher.fullName || "TBD",
+            home_starter_id: homePitcher.id || null,
+
+            away_team: awayTeam.team.name,
+            away_wins: awayTeam.leagueRecord ? awayTeam.leagueRecord.wins : 0,
+            away_losses: awayTeam.leagueRecord ? awayTeam.leagueRecord.losses : 0,
+            away_pct: awayTeam.leagueRecord ? awayTeam.leagueRecord.pct : ".000",
+            away_starter_name: awayPitcher.fullName || "TBD",
+            away_starter_id: awayPitcher.id || null,
+
+            venue: game.venue ? game.venue.name : "Unknown"
+          });
+        }
+      }
+    }
+
+    res.json({ matchups });
+
+  } catch (error) {
+    console.error("Stats Fetch Error:", error);
+    res.status(500).json({ error: "Failed to fetch stats", details: error.message });
   }
 });
 
