@@ -4,43 +4,38 @@ import fetch from "node-fetch";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Your specific The Odds API Key
 const API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 
 app.get("/mlb", async (req, res) => {
   try {
-    // 1. Fetch raw data from The Odds API (v4)
     const url = `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${API_KEY}&regions=us&markets=h2h,totals&oddsFormat=decimal`;
     
     const response = await fetch(url);
     const oddsData = await response.json();
 
-    console.log("Total events received from The Odds API:", oddsData ? oddsData.length : 0);
-
-    // Error handling if API key or request fails
     if (!Array.isArray(oddsData)) {
-      return res.status(400).json({ 
-        error: "Odds API Error", 
-        details: oddsData 
-      });
+      return res.status(400).json({ error: "Odds API Error", details: oddsData });
     }
 
-    // 2. Group games by date string (YYYY-MM-DD)
     const gamesByDate = {};
 
     oddsData.forEach((game) => {
-      // Extract YYYY-MM-DD for the top-level date grouping
-      const gameDateStr = game.commence_time 
-        ? game.commence_time.split("T")[0] 
-        : "1970-01-01";
+      // 1. Convert UTC string to Date object
+      const utcDate = new Date(game.commence_time);
 
-      // Build structured game record matching MLB Stats API schema
+      // 2. Hardcode offset to fixed MST (UTC - 7 Hours)
+      const mstDate = new Date(utcDate.getTime() - (7 * 60 * 60 * 1000));
+
+      // 3. Format into local ISO string (YYYY-MM-DDTHH:mm:ss) without 'Z'
+      const formattedMstString = mstDate.toISOString().replace("Z", "");
+      const gameDateStr = formattedMstString.split("T")[0];
+
       const formattedGame = {
         gamePk: game.id || "000000",
         gameGuid: game.id || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
-        gameDate: game.commence_time || "", // Standard ISO UTC string for Power Query DateTimeZone conversion
+        gameDate: formattedMstString, // Pre-converted MST DateTime string
         dayNight: "day",
         scheduledInnings: 9,
         status: {
@@ -78,7 +73,6 @@ app.get("/mlb", async (req, res) => {
       gamesByDate[gameDateStr].push(formattedGame);
     });
 
-    // 3. Format into root object with 'dates' array
     const formattedPayload = {
       dates: Object.keys(gamesByDate).map((dateKey) => ({
         date: dateKey,
@@ -90,10 +84,7 @@ app.get("/mlb", async (req, res) => {
 
   } catch (error) {
     console.error("Proxy Error:", error);
-    res.status(500).json({ 
-      error: "Proxy Failed", 
-      details: error.message 
-    });
+    res.status(500).json({ error: "Proxy Failed", details: error.message });
   }
 });
 
