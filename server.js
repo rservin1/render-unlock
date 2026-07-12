@@ -17,7 +17,7 @@ async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
     const res = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`
+      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`
     );
     const data = await res.json();
 
@@ -32,7 +32,10 @@ async function getMlbScheduleMap() {
             abstractState: g.status.abstractGameState,
             detailedState: g.status.detailedState,
             statusCode: g.status.statusCode,
-            gameDateUtc: g.gameDate
+
+            // ⭐ Pitcher IDs added here ⭐
+            homePitcherId: g.teams?.home?.probablePitcher?.id || null,
+            awayPitcherId: g.teams?.away?.probablePitcher?.id || null
           };
         }
       });
@@ -161,6 +164,10 @@ app.get("/mlb", async (req, res) => {
           name: `${homeTeam} Stadium`
         },
 
+        // ⭐ Pitcher IDs added directly into /mlb ⭐
+        home_pitcher_id: mlb.homePitcherId || null,
+        away_pitcher_id: mlb.awayPitcherId || null,
+
         // ONLY MGM + DraftKings
         parlayData: {
           draftkings_ml_away: dkData.mlAway,
@@ -261,7 +268,6 @@ app.get("/stats", async (req, res) => {
             home_pitcher: homePitcherFormatted,
             away_pitcher: awayPitcherFormatted,
 
-            // ⭐ Pitcher IDs added ⭐
             home_pitcher_id: homePitcherRaw.id || null,
             away_pitcher_id: awayPitcherRaw.id || null
           });
