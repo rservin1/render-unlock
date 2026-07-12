@@ -3,7 +3,6 @@ import fetch from "node-fetch";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
@@ -42,7 +41,7 @@ async function getMlbScheduleList() {
             gamesList.push({
               normHome,
               normAway,
-              officialDate: g.officialDate || d.date,
+              officialDate: g.officialDate || d.date, // Store date to prevent mis-matching dates
               gamePk: g.gamePk.toString(),
               gameGuid: g.gameGuid || "N/A",
               gameType: g.gameType || "R",
@@ -106,8 +105,10 @@ app.get("/mlb", async (req, res) => {
       const normHome = normalizeName(game.home_team);
       const normAway = normalizeName(game.away_team);
 
-      // Flexible matching: Match home team first, or fallback to away team match
+      // FIX BUG 1: Match by DATE in addition to team names so future games don't inherit current status
       const matchedMlb = mlbGamesList.find(
+        (m) => m.officialDate === gameDateStr && (m.normHome === normHome || m.normAway === normAway)
+      ) || mlbGamesList.find(
         (m) => m.normHome === normHome || m.normAway === normAway
       );
 
@@ -159,30 +160,49 @@ app.get("/mlb", async (req, res) => {
 // GET /stats Endpoint
 app.get("/stats", async (req, res) => {
   try {
-    const today = getDateStr(0);
+    // FIX BUG 2: Expand range to 3 days to handle timezone offsets cleanly
+    const startDate = getDateStr(-1);
+    const endDate = getDateStr(1);
+
     const resMlb = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`
+      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&hydrate=probablePitcher`
     );
     const data = await resMlb.json();
     const matchups = [];
 
-    if (data.dates?.[0]?.games) {
-      for (const game of data.dates[0].games) {
-        const [home, away] = await Promise.all([
-          getPitcherDetails(game.teams?.home?.probablePitcher?.id),
-          getPitcherDetails(game.teams?.away?.probablePitcher?.id)
-        ]);
-        matchups.push({
-          gamePk: game.gamePk.toString(),
-          home_team: game.teams?.home?.team?.name,
-          away_team: game.teams?.away?.team?.name,
-          home_pitcher: `${game.teams?.home?.probablePitcher?.fullName || "TBD"} (${[home.hand, home.era].filter(Boolean).join(", ")})`,
-          away_pitcher: `${game.teams?.away?.probablePitcher?.fullName || "TBD"} (${[away.hand, away.era].filter(Boolean).join(", ")})`
-        });
+    if (data.dates) {
+      for (const d of data.dates) {
+        if (d.games) {
+          for (const game of d.games) {
+            const [home, away] = await Promise.all([
+              getPitcherDetails(game.teams?.home?.probablePitcher?.id),
+              getPitcherDetails(game.teams?.away?.probablePitcher?.id)
+            ]);
+
+            const homePitcherName = game.teams?.home?.probablePitcher?.fullName || "TBD";
+            const awayPitcherName = game.teams?.away?.probablePitcher?.fullName || "TBD";
+
+            matchups.push({
+              gamePk: game.gamePk.toString(),
+              officialDate: game.officialDate || d.date,
+              // Keys matching direct table mapping
+              "Stats.Home Team": game.teams?.home?.team?.name || "",
+              "Stats.Away Team": game.teams?.away?.team?.name || "",
+              "Stats.Home Pitcher": `${homePitcherName}${home.hand || home.era ? ` (${[home.hand, home.era].filter(Boolean).join(", ")})` : ""}`,
+              "Stats.Away Pitcher": `${awayPitcherName}${away.hand || away.era ? ` (${[away.hand, away.era].filter(Boolean).join(", ")})` : ""}`,
+              // Original property names fallback
+              home_team: game.teams?.home?.team?.name || "",
+              away_team: game.teams?.away?.team?.name || "",
+              home_pitcher: `${homePitcherName}${home.hand || home.era ? ` (${[home.hand, home.era].filter(Boolean).join(", ")})` : ""}`,
+              away_pitcher: `${awayPitcherName}${away.hand || away.era ? ` (${[away.hand, away.era].filter(Boolean).join(", ")})` : ""}`
+            });
+          }
+        }
       }
     }
+
     res.setHeader("Content-Type", "application/json");
-    res.json({ matchups });
+    res.json(matchups); // Output as array directly to simplify Apps Script mapping
   } catch (error) {
     console.error("Stats Error:", error);
     res.status(500).json({ error: "Stats Error" });
