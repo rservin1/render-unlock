@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 10000;
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 const PARLAY_BASE_URL = "https://api.parlay-api.com";
 
-// Map short sport keys (e.g. "mlb") to full Parlay keys ("baseball_mlb")
+// Map short sport aliases to full Parlay API keys
 function normalizeSportKey(key) {
   if (!key) return "baseball_mlb";
   const map = {
@@ -19,7 +19,7 @@ function normalizeSportKey(key) {
   return map[key.toLowerCase()] || key;
 }
 
-// Convert UTC → MST
+// Convert UTC timestamp → MST
 function formatToMST(utcString, timeOnly = false) {
   if (!utcString) return "";
   const dateObj = new Date(utcString);
@@ -172,14 +172,11 @@ function transformGameData(game, mlbMap = {}) {
   };
 }
 
-// 1. Live Points REST Polling Endpoint
-const handleLivePoints = async (req, res) => {
+// Helper to handle Parlay requests
+async function fetchAndTransform(endpointUrl, rawSportKey, res) {
   try {
-    const rawKey = req.params.sport_key || "baseball_mlb";
-    const sportKey = normalizeSportKey(rawKey);
-
-    const oddsUrl = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/points?apiKey=${PARLAY_API_KEY}`;
-    const oddsRes = await fetch(oddsUrl);
+    const sportKey = normalizeSportKey(rawSportKey);
+    const oddsRes = await fetch(endpointUrl);
 
     if (!oddsRes.ok) {
       const errorText = await oddsRes.text();
@@ -210,18 +207,33 @@ const handleLivePoints = async (req, res) => {
       }))
     });
   } catch (err) {
-    console.error("Live points error:", err.message);
-    res.status(500).json({ error: "Failed to fetch live points", details: err.message });
+    console.error("API processing error:", err.message);
+    res.status(500).json({ error: "Failed to process request", details: err.message });
   }
-};
+}
 
-app.get("/mlb", handleLivePoints);
-app.get("/v1/sports/:sport_key/live/points", handleLivePoints);
+// 1. Live/In-Play Points Endpoint
+app.get("/mlb", (req, res) => {
+  const url = `${PARLAY_BASE_URL}/v1/sports/baseball_mlb/live/points?apiKey=${PARLAY_API_KEY}`;
+  fetchAndTransform(url, "baseball_mlb", res);
+});
 
-// 2. Server-Sent Events (SSE) Proxy Endpoint
+app.get("/v1/sports/:sport_key/live/points", (req, res) => {
+  const sportKey = normalizeSportKey(req.params.sport_key);
+  const url = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/points?apiKey=${PARLAY_API_KEY}`;
+  fetchAndTransform(url, sportKey, res);
+});
+
+// 2. Pre-game / Upcoming Odds Endpoint
+app.get("/v1/sports/:sport_key/odds", (req, res) => {
+  const sportKey = normalizeSportKey(req.params.sport_key);
+  const url = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/odds?apiKey=${PARLAY_API_KEY}&regions=us&markets=h2h,spreads,totals`;
+  fetchAndTransform(url, sportKey, res);
+});
+
+// 3. SSE Stream Proxy Endpoint
 app.get("/v1/sports/:sport_key/live/sse", async (req, res) => {
-  const rawKey = req.params.sport_key || "baseball_mlb";
-  const sportKey = normalizeSportKey(rawKey);
+  const sportKey = normalizeSportKey(req.params.sport_key);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -237,13 +249,8 @@ app.get("/v1/sports/:sport_key/live/sse", async (req, res) => {
       return res.end();
     }
 
-    upstreamRes.body.on("data", (chunk) => {
-      res.write(chunk);
-    });
-
-    upstreamRes.body.on("end", () => {
-      res.end();
-    });
+    upstreamRes.body.on("data", (chunk) => res.write(chunk));
+    upstreamRes.body.on("end", () => res.end());
 
     req.on("close", () => {
       if (upstreamRes.body.destroy) upstreamRes.body.destroy();
