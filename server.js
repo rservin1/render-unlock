@@ -39,20 +39,6 @@ async function getMlbScheduleMap() {
   }
 }
 
-async function getPitcherDetails(pitcherId) {
-  if (!pitcherId) return { hand: "", era: "" };
-  try {
-    const res = await fetch(`https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`);
-    const data = await res.json();
-    const person = data.people?.[0] || {};
-    const handCode = person.pitchHand?.code || "";
-    const era = person.stats?.[0]?.splits?.[0]?.stat?.era || "";
-    return { hand: handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : ""), era: era };
-  } catch (err) {
-    return { hand: "", era: "" };
-  }
-}
-
 app.get("/mlb", async (req, res) => {
   try {
     const [oddsRes, parlayRes, mlbMapRes] = await Promise.allSettled([
@@ -98,33 +84,6 @@ app.get("/mlb", async (req, res) => {
     res.json({ dates: Object.keys(gamesByDate).map((d) => ({ date: d, games: gamesByDate[d] })) });
   } catch (error) {
     res.status(500).json({ error: "Proxy Error" });
-  }
-});
-
-app.get("/stats", async (req, res) => {
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const resMlb = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`);
-    const data = await resMlb.json();
-    const matchups = [];
-    if (data.dates?.[0]?.games) {
-      for (const game of data.dates[0].games) {
-        const [home, away] = await Promise.all([
-          getPitcherDetails(game.teams?.home?.probablePitcher?.id),
-          getPitcherDetails(game.teams?.away?.probablePitcher?.id)
-        ]);
-        matchups.push({
-          gamePk: game.gamePk.toString(),
-          home_team: game.teams?.home?.team?.name,
-          away_team: game.teams?.away?.team?.name,
-          home_pitcher: `${game.teams?.home?.probablePitcher?.fullName || "TBD"} (${[home.hand, home.era].filter(Boolean).join(", ")})`,
-          away_pitcher: `${game.teams?.away?.probablePitcher?.fullName || "TBD"} (${[away.hand, away.era].filter(Boolean).join(", ")})`
-        });
-      }
-    }
-    res.json({ matchups });
-  } catch (error) {
-    res.status(500).json({ error: "Stats Error" });
   }
 });
 
