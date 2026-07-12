@@ -23,9 +23,15 @@ async function getMlbScheduleMap() {
         const normHome = normalizeName(g.teams?.home?.team?.name);
         map[normHome] = {
           gamePk: g.gamePk.toString(),
+          gameGuid: g.gameGuid || "N/A",
+          gameType: g.gameType || "R",
+          season: g.season || "2026",
           abstractState: g.status.abstractGameState,
           detailedState: g.status.detailedState,
           statusCode: g.status.statusCode,
+          dayNight: g.dayNight || "day",
+          scheduledInnings: g.scheduledInnings || 9,
+          venue: g.venue || { id: 0, name: "TBD" },
           linescore: {
             currentInning: g.linescore?.currentInning || 0,
             inningHalf: g.linescore?.inningHalf || "None"
@@ -37,18 +43,6 @@ async function getMlbScheduleMap() {
   } catch (err) { return {}; }
 }
 
-async function getPitcherDetails(pitcherId) {
-  if (!pitcherId) return { hand: "", era: "" };
-  try {
-    const res = await fetch(`https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`);
-    const data = await res.json();
-    const person = data.people?.[0] || {};
-    const handCode = person.pitchHand?.code || "";
-    const era = person.stats?.[0]?.splits?.[0]?.stat?.era || "";
-    return { hand: handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : ""), era: era };
-  } catch (err) { return { hand: "", era: "" }; }
-}
-
 app.get("/mlb", async (req, res) => {
   try {
     const [oddsRes, parlayRes, mlbMapRes] = await Promise.allSettled([
@@ -56,6 +50,7 @@ app.get("/mlb", async (req, res) => {
       fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`),
       getMlbScheduleMap()
     ]);
+
     const oddsData = oddsRes.status === "fulfilled" && oddsRes.value.ok ? await oddsRes.value.json() : [];
     const parlayData = parlayRes.status === "fulfilled" && parlayRes.value.ok ? await parlayRes.value.json().catch(() => null) : null;
     const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
@@ -71,6 +66,9 @@ app.get("/mlb", async (req, res) => {
       if (!gamesByDate[gameDateStr]) gamesByDate[gameDateStr] = [];
       gamesByDate[gameDateStr].push({
         gamePk: matchedMlb?.gamePk || game.id || "000000",
+        gameGuid: matchedMlb?.gameGuid || "N/A",
+        gameType: matchedMlb?.gameType || "R",
+        season: matchedMlb?.season || "2026",
         gameDate: game.commence_time || "",
         status: {
           abstractGameState: matchedMlb?.abstractState || "Preview",
@@ -81,9 +79,9 @@ app.get("/mlb", async (req, res) => {
           away: { score: awayScore, isWinner: game.completed && (awayScore > homeScore), team: { id: game.away_team, name: game.away_team } }, 
           home: { score: homeScore, isWinner: game.completed && (homeScore > awayScore), team: { id: game.home_team, name: game.home_team } } 
         },
-        venue: { id: 0, name: `${game.home_team} Stadium` },
-        dayNight: "day",
-        scheduledInnings: 9,
+        venue: matchedMlb?.venue || { id: 0, name: `${game.home_team} Stadium` },
+        dayNight: matchedMlb?.dayNight || "day",
+        scheduledInnings: matchedMlb?.scheduledInnings || 9,
         linescore: matchedMlb?.linescore || { currentInning: 0, inningHalf: "None" },
         parlayData: (Array.isArray(parlayData) ? parlayData.find((p) => p.home_team === game.home_team) : null) || { status: "None" }
       });
@@ -92,29 +90,4 @@ app.get("/mlb", async (req, res) => {
   } catch (error) { res.status(500).json({ error: "Proxy Error" }); }
 });
 
-app.get("/stats", async (req, res) => {
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const resMlb = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`);
-    const data = await resMlb.json();
-    const matchups = [];
-    if (data.dates?.[0]?.games) {
-      for (const game of data.dates[0].games) {
-        const [home, away] = await Promise.all([
-          getPitcherDetails(game.teams?.home?.probablePitcher?.id),
-          getPitcherDetails(game.teams?.away?.probablePitcher?.id)
-        ]);
-        matchups.push({
-          gamePk: game.gamePk.toString(),
-          home_team: game.teams?.home?.team?.name,
-          away_team: game.teams?.away?.team?.name,
-          home_pitcher: `${game.teams?.home?.probablePitcher?.fullName || "TBD"} (${[home.hand, home.era].filter(Boolean).join(", ")})`,
-          away_pitcher: `${game.teams?.away?.probablePitcher?.fullName || "TBD"} (${[away.hand, away.era].filter(Boolean).join(", ")})`
-        });
-      }
-    }
-    res.json({ matchups });
-  } catch (error) { res.status(500).json({ error: "Stats Error" }); }
-});
-
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// [Keep your existing /stats endpoint here...]
