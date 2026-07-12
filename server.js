@@ -1,5 +1,4 @@
 const express = require("express");
-const http = require("http");
 const https = require("https");
 
 const app = express();
@@ -53,26 +52,45 @@ function normalizeName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// Helper HTTPS GET request (Node 14+ compatible)
+function httpGetJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(new Error("Invalid JSON response"));
+          }
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+        }
+      });
+    }).on("error", reject);
+  });
+}
+
 // Fetch MLB schedule mapping
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
-    const res = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`
-    );
-    const data = await res.json();
+    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`;
+    const data = await httpGetJson(url);
 
     const map = {};
-    if (data.dates?.length > 0) {
+    if (data.dates && data.dates.length > 0) {
       data.dates[0].games.forEach((g) => {
         const home = g.teams?.home?.team?.name;
         if (home) {
           const norm = normalizeName(home);
           map[norm] = {
-            gamePk: g.gamePk.toString(),
-            abstractState: g.status.abstractGameState,
-            detailedState: g.status.detailedState,
-            statusCode: g.status.statusCode,
+            gamePk: g.gamePk ? g.gamePk.toString() : "",
+            abstractState: g.status?.abstractGameState || "Preview",
+            detailedState: g.status?.detailedState || "Scheduled",
+            statusCode: g.status?.statusCode || "S",
             gameDateUtc: g.gameDate
           };
         }
@@ -87,8 +105,8 @@ async function getMlbScheduleMap() {
 
 // Transform game records
 function transformGameData(game, mlbMap = {}) {
-  const homeTeam = game.home_team;
-  const awayTeam = game.away_team;
+  const homeTeam = game.home_team || "";
+  const awayTeam = game.away_team || "";
 
   const normHome = normalizeName(homeTeam);
   const mlb = mlbMap[normHome] || {};
@@ -182,18 +200,8 @@ const handleLivePoints = async (req, res) => {
     const sportKey = normalizeSportKey(rawKey);
 
     const oddsUrl = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/points?apiKey=${PARLAY_API_KEY}`;
-    const oddsRes = await fetch(oddsUrl);
+    const oddsJson = await httpGetJson(oddsUrl);
 
-    if (!oddsRes.ok) {
-      const errorText = await oddsRes.text();
-      console.error(`Parlay API Error (${oddsRes.status}):`, errorText);
-      return res.status(oddsRes.status).json({
-        error: `Parlay API error (${oddsRes.status})`,
-        details: errorText
-      });
-    }
-
-    const oddsJson = await oddsRes.json();
     const mlbMap = sportKey.includes("mlb") ? await getMlbScheduleMap() : {};
     const gamesByDate = {};
 
