@@ -130,8 +130,8 @@ app.get("/mlb", async (req, res) => {
       const mgmData = extractMarkets(mgm);
 
       const formattedGame = {
-        gamePk: mlb.gamePk || game.id || "",
-        gameGuid: game.id || "",
+        gamePk: mlb.gamePk || game.gameId || "",
+        gameGuid: game.gameId || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
         gameDate: game.commence_time,
@@ -256,4 +256,7 @@ app.get("/stats", async (req, res) => {
 
           matchups.push({
             gamePk: game.gamePk.toString(),
-            home_team: home
+            home_team: homeTeamFormatted,
+            away_team: awayTeamFormatted,
+
+            home_pitcher: homePitcherFormatted,
