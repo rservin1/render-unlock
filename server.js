@@ -7,11 +7,13 @@ const PORT = process.env.PORT || 10000;
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
+// Helper: Normalize names for mapping
 function normalizeName(name) {
   if (!name) return "";
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+// Fetch MLB Schedule Map
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -43,6 +45,7 @@ async function getMlbScheduleMap() {
   } catch (err) { return {}; }
 }
 
+// Fetch Pitcher Details
 async function getPitcherDetails(pitcherId) {
   if (!pitcherId) return { hand: "", era: "" };
   try {
@@ -55,6 +58,7 @@ async function getPitcherDetails(pitcherId) {
   } catch (err) { return { hand: "", era: "" }; }
 }
 
+// Endpoint: /mlb
 app.get("/mlb", async (req, res) => {
   try {
     const [oddsRes, parlayRes, mlbMapRes] = await Promise.allSettled([
@@ -65,7 +69,7 @@ app.get("/mlb", async (req, res) => {
 
     const oddsData = oddsRes.status === "fulfilled" && oddsRes.value.ok ? await oddsRes.value.json() : [];
     const parlayData = parlayRes.status === "fulfilled" && parlayRes.value.ok ? await parlayRes.value.json().catch(() => null) : null;
-    const mlbMap = oddsRes.status === "fulfilled" ? mlbMapRes.value : {};
+    const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
 
     const gamesByDate = {};
     oddsData.forEach((game) => {
@@ -102,11 +106,13 @@ app.get("/mlb", async (req, res) => {
   } catch (error) { res.status(500).json({ error: "Proxy Error" }); }
 });
 
+// Endpoint: /stats
 app.get("/stats", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
     const resMlb = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`);
-    const data = await res.json();
+    if (!resMlb.ok) throw new Error("MLB API fetch failed");
+    const data = await resMlb.json();
     const matchups = [];
     if (data.dates?.[0]?.games) {
       for (const game of data.dates[0].games) {
