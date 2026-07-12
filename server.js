@@ -35,7 +35,6 @@ async function getMlbScheduleMap() {
     }
     return map;
   } catch (err) {
-    console.error("Error in getMlbScheduleMap:", err);
     return {};
   }
 }
@@ -71,6 +70,8 @@ app.get("/mlb", async (req, res) => {
       const gameDateStr = game.commence_time?.split("T")[0] || "1970-01-01";
       const normHome = normalizeName(game.home_team);
       const matchedMlb = mlbMap[normHome];
+      const homeScore = game.scores?.find(s => s.name === game.home_team)?.score || 0;
+      const awayScore = game.scores?.find(s => s.name === game.away_team)?.score || 0;
 
       if (!gamesByDate[gameDateStr]) gamesByDate[gameDateStr] = [];
       
@@ -83,9 +84,12 @@ app.get("/mlb", async (req, res) => {
           statusCode: matchedMlb?.statusCode || "S"
         },
         teams: { 
-          away: { score: game.scores?.find(s => s.name === game.away_team)?.score || 0, team: { name: game.away_team } }, 
-          home: { score: game.scores?.find(s => s.name === game.home_team)?.score || 0, team: { name: game.home_team } } 
+          away: { score: awayScore, isWinner: game.completed && (awayScore > homeScore), team: { id: game.away_team, name: game.away_team } }, 
+          home: { score: homeScore, isWinner: game.completed && (homeScore > awayScore), team: { id: game.home_team, name: game.home_team } } 
         },
+        venue: { id: 0, name: `${game.home_team} Stadium` },
+        dayNight: "day",
+        scheduledInnings: 9,
         linescore: matchedMlb?.linescore || { currentInning: 0, inningHalf: "None" },
         parlayData: (Array.isArray(parlayData) ? parlayData.find((p) => p.home_team === game.home_team) : null) || { status: "None" }
       });
