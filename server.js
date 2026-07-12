@@ -1,212 +1,258 @@
 import express from "express";
 import fetch from "node-fetch";
 
+// 1. INITIALIZE EXPRESS FIRST
 const app = express();
 const PORT = process.env.PORT || 10000;
+
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
-// Clean team names for consistent dictionary lookups
+// Helper: Normalize team names
 function normalizeName(name) {
   if (!name) return "";
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Get date string relative to today (in days offset)
-function getDateStr(offsetDays = 0) {
-  const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().split("T")[0];
-}
-
-// Fetch 3 days of MLB Schedule to handle timezone crossovers
-async function getMlbScheduleList() {
+// Helper: Fetch live official MLB game statuses & gamePk map
+async function getMlbScheduleMap() {
   try {
-    const startDate = getDateStr(-1); // Yesterday
-    const endDate = getDateStr(1);   // Tomorrow
-
-    const res = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&hydrate=linescore,venue`
-    );
+    const today = new Date().toISOString().split("T")[0];
+    const res = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`);
     const data = await res.json();
-    const gamesList = [];
-
-    if (data.dates) {
-      data.dates.forEach((d) => {
-        if (d.games) {
-          d.games.forEach((g) => {
-            const normHome = normalizeName(g.teams?.home?.team?.name);
-            const normAway = normalizeName(g.teams?.away?.team?.name);
-
-            gamesList.push({
-              normHome,
-              normAway,
-              officialDate: g.officialDate || d.date, // Store date to prevent mis-matching dates
-              gamePk: g.gamePk.toString(),
-              gameGuid: g.gameGuid || "N/A",
-              gameType: g.gameType || "R",
-              season: g.season || "2026",
-              abstractState: g.status?.abstractGameState || "Preview",
-              detailedState: g.status?.detailedState || "Scheduled",
-              statusCode: g.status?.statusCode || "S",
-              dayNight: g.dayNight || "day",
-              scheduledInnings: g.scheduledInnings || 9,
-              venue: g.venue || { id: 0, name: "TBD" },
-              linescore: {
-                currentInning: g.linescore?.currentInning || 0,
-                inningHalf: g.linescore?.inningHalf || "None"
-              }
-            });
-          });
+    
+    const map = {};
+    if (data.dates && data.dates.length > 0) {
+      data.dates[0].games.forEach((g) => {
+        if (g.teams && g.teams.home && g.teams.home.team) {
+          const normHome = normalizeName(g.teams.home.team.name);
+          map[normHome] = {
+            gamePk: g.gamePk.toString(),
+            abstractState: g.status.abstractGameState,
+            detailedState: g.status.detailedState,
+            statusCode: g.status.statusCode
+          };
         }
       });
     }
-    return gamesList;
+    return map;
   } catch (err) {
-    console.error("MLB Schedule Fetch Error:", err);
-    return [];
+    console.error("Error building MLB map:", err);
+    return {};
   }
 }
 
-// Fetch Pitcher details helper
+// Helper: Fetch Pitcher Hand and ERA
 async function getPitcherDetails(pitcherId) {
   if (!pitcherId) return { hand: "", era: "" };
   try {
-    const res = await fetch(
-      `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`
-    );
+    const url = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
+    const res = await fetch(url);
     const data = await res.json();
+
     const person = data.people?.[0] || {};
+    
     const handCode = person.pitchHand?.code || "";
-    const era = person.stats?.[0]?.splits?.[0]?.stat?.era || "";
-    return { hand: handCode === "L" ? "LHP" : handCode === "R" ? "RHP" : "", era };
+    const handStr = handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : "");
+
+    let eraStr = "";
+    const splits = person.stats?.[0]?.splits;
+    if (splits && splits.length > 0 && splits[0].stat?.era) {
+      eraStr = splits[0].stat.era;
+    }
+
+    return { hand: handStr, era: eraStr };
   } catch (err) {
+    console.error(`Error fetching details for pitcher ${pitcherId}:`, err);
     return { hand: "", era: "" };
   }
 }
 
-// GET /mlb Endpoint
+// ==========================================
+// ENDPOINT 1: LIVE SCORES & ODDS (/mlb)
+// ==========================================
 app.get("/mlb", async (req, res) => {
   try {
-    const [oddsRes, parlayRes, mlbGamesList] = await Promise.all([
-      fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`)
-        .then((r) => (r.ok ? r.json() : []))
-        .catch(() => []),
-      fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null),
-      getMlbScheduleList()
+    const [oddsRes, parlayRes, mlbMapRes] = await Promise.allSettled([
+      fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
+      fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`),
+      getMlbScheduleMap()
     ]);
+
+    let oddsData = [];
+    if (oddsRes.status === "fulfilled" && oddsRes.value.ok) {
+      oddsData = await oddsRes.value.json();
+    }
+
+    let parlayData = null;
+    if (parlayRes.status === "fulfilled" && parlayRes.value.ok) {
+      parlayData = await parlayRes.value.json().catch(() => null);
+    }
+
+    const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
+
+    if (!Array.isArray(oddsData)) {
+      return res.status(400).json({ error: "Odds API Error", details: oddsData });
+    }
 
     const gamesByDate = {};
 
-    oddsRes.forEach((game) => {
-      const gameDateStr = game.commence_time?.split("T")[0] || getDateStr(0);
+    oddsData.forEach((game) => {
+      const gameDateStr = game.commence_time 
+        ? game.commence_time.split("T")[0] 
+        : "1970-01-01";
+
+      let homeScore = 0;
+      let awayScore = 0;
+
+      if (Array.isArray(game.scores)) {
+        const homeObj = game.scores.find((s) => s.name === game.home_team);
+        const awayObj = game.scores.find((s) => s.name === game.away_team);
+
+        if (homeObj && homeObj.score !== undefined) homeScore = parseInt(homeObj.score, 10) || 0;
+        if (awayObj && awayObj.score !== undefined) awayScore = parseInt(awayObj.score, 10) || 0;
+      }
+
+      const homeWinner = game.completed && homeScore > awayScore;
+      const awayWinner = game.completed && awayScore > homeScore;
+
+      const parlayInfo = Array.isArray(parlayData) 
+        ? parlayData.find((p) => p.home_team === game.home_team || p.id === game.id) || null
+        : null;
+
       const normHome = normalizeName(game.home_team);
-      const normAway = normalizeName(game.away_team);
+      const matchedMlb = mlbMap[normHome];
 
-      // FIX BUG 1: Match by DATE in addition to team names so future games don't inherit current status
-      const matchedMlb = mlbGamesList.find(
-        (m) => m.officialDate === gameDateStr && (m.normHome === normHome || m.normAway === normAway)
-      ) || mlbGamesList.find(
-        (m) => m.normHome === normHome || m.normAway === normAway
-      );
+      const officialGamePk = matchedMlb ? matchedMlb.gamePk : (game.id || "000000");
+      const abstractState = matchedMlb ? matchedMlb.abstractState : (game.completed ? "Final" : (game.scores ? "Live" : "Preview"));
+      const detailedState = matchedMlb ? matchedMlb.detailedState : (game.completed ? "Final" : (game.scores ? "In Progress" : "Scheduled"));
+      const statusCode = matchedMlb ? matchedMlb.statusCode : (game.completed ? "F" : (game.scores ? "I" : "S"));
 
-      const homeScore = game.scores?.find((s) => s.name === game.home_team)?.score || 0;
-      const awayScore = game.scores?.find((s) => s.name === game.away_team)?.score || 0;
-
-      if (!gamesByDate[gameDateStr]) gamesByDate[gameDateStr] = [];
-
-      gamesByDate[gameDateStr].push({
-        gamePk: matchedMlb?.gamePk || game.id || "000000",
-        gameGuid: matchedMlb?.gameGuid || "N/A",
-        gameType: matchedMlb?.gameType || "R",
-        season: matchedMlb?.season || "2026",
+      const formattedGame = {
+        gamePk: officialGamePk,
+        gameGuid: game.id || "",
+        gameType: "R",
+        season: new Date().getFullYear().toString(),
         gameDate: game.commence_time || "",
+        dayNight: "day",
+        scheduledInnings: 9,
         status: {
-          abstractGameState: matchedMlb?.abstractState || (game.completed ? "Final" : "Preview"),
-          detailedState: matchedMlb?.detailedState || (game.completed ? "Final" : "Scheduled"),
-          statusCode: matchedMlb?.statusCode || (game.completed ? "F" : "S")
+          abstractGameState: abstractState,
+          detailedState: detailedState,
+          statusCode: statusCode
         },
         teams: {
           away: {
             score: awayScore,
-            isWinner: game.completed && awayScore > homeScore,
-            team: { id: game.away_team, name: game.away_team }
+            isWinner: awayWinner,
+            team: {
+              id: game.away_team || "Away",
+              name: game.away_team ? game.away_team.trim() : "Away Team"
+            }
           },
           home: {
             score: homeScore,
-            isWinner: game.completed && homeScore > awayScore,
-            team: { id: game.home_team, name: game.home_team }
+            isWinner: homeWinner,
+            team: {
+              id: game.home_team || "Home",
+              name: game.home_team ? game.home_team.trim() : "Home Team"
+            }
           }
         },
-        venue: matchedMlb?.venue || { id: 0, name: `${game.home_team} Stadium` },
-        dayNight: matchedMlb?.dayNight || "day",
-        scheduledInnings: matchedMlb?.scheduledInnings || 9,
-        linescore: matchedMlb?.linescore || { currentInning: 0, inningHalf: "None" },
-        parlayData: (Array.isArray(parlayRes) ? parlayRes.find((p) => p.home_team === game.home_team) : null) || { status: "None" }
-      });
+        venue: {
+          id: 0,
+          name: game.home_team ? `${game.home_team.trim()} Stadium` : "MLB Venue"
+        },
+        parlayData: parlayInfo
+      };
+
+      if (!gamesByDate[gameDateStr]) {
+        gamesByDate[gameDateStr] = [];
+      }
+      gamesByDate[gameDateStr].push(formattedGame);
     });
 
     res.json({
-      dates: Object.keys(gamesByDate).map((d) => ({ date: d, games: gamesByDate[d] }))
+      dates: Object.keys(gamesByDate).map((dateKey) => ({
+        date: dateKey,
+        games: gamesByDate[dateKey]
+      }))
     });
+
   } catch (error) {
     console.error("Proxy Error:", error);
-    res.status(500).json({ error: "Proxy Error" });
+    res.status(500).json({ error: "Proxy Failed", details: error.message });
   }
 });
 
-// GET /stats Endpoint
+// ==========================================
+// ENDPOINT 2: HISTORICAL TRENDS & MATCHUPS (/stats)
+// ==========================================
 app.get("/stats", async (req, res) => {
   try {
-    // FIX BUG 2: Expand range to 3 days to handle timezone offsets cleanly
-    const startDate = getDateStr(-1);
-    const endDate = getDateStr(1);
+    const today = new Date().toISOString().split("T")[0];
+    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`;
 
-    const resMlb = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&hydrate=probablePitcher`
-    );
-    const data = await resMlb.json();
+    const mlbRes = await fetch(mlbUrl);
+    const mlbData = await mlbRes.json();
+
     const matchups = [];
 
-    if (data.dates) {
-      for (const d of data.dates) {
-        if (d.games) {
-          for (const game of d.games) {
-            const [home, away] = await Promise.all([
-              getPitcherDetails(game.teams?.home?.probablePitcher?.id),
-              getPitcherDetails(game.teams?.away?.probablePitcher?.id)
-            ]);
+    if (mlbData.dates && mlbData.dates.length > 0) {
+      for (const dateObj of mlbData.dates) {
+        for (const game of dateObj.games) {
+          const homeTeam = game.teams?.home || {};
+          const awayTeam = game.teams?.away || {};
 
-            const homePitcherName = game.teams?.home?.probablePitcher?.fullName || "TBD";
-            const awayPitcherName = game.teams?.away?.probablePitcher?.fullName || "TBD";
+          const homePitcherRaw = homeTeam.probablePitcher || {};
+          const awayPitcherRaw = awayTeam.probablePitcher || {};
 
-            matchups.push({
-              gamePk: game.gamePk.toString(),
-              officialDate: game.officialDate || d.date,
-              // Keys matching direct table mapping
-              "Stats.Home Team": game.teams?.home?.team?.name || "",
-              "Stats.Away Team": game.teams?.away?.team?.name || "",
-              "Stats.Home Pitcher": `${homePitcherName}${home.hand || home.era ? ` (${[home.hand, home.era].filter(Boolean).join(", ")})` : ""}`,
-              "Stats.Away Pitcher": `${awayPitcherName}${away.hand || away.era ? ` (${[away.hand, away.era].filter(Boolean).join(", ")})` : ""}`,
-              // Original property names fallback
-              home_team: game.teams?.home?.team?.name || "",
-              away_team: game.teams?.away?.team?.name || "",
-              home_pitcher: `${homePitcherName}${home.hand || home.era ? ` (${[home.hand, home.era].filter(Boolean).join(", ")})` : ""}`,
-              away_pitcher: `${awayPitcherName}${away.hand || away.era ? ` (${[away.hand, away.era].filter(Boolean).join(", ")})` : ""}`
-            });
+          // Fetch Hand and ERA in parallel
+          const [homeDetails, awayDetails] = await Promise.all([
+            getPitcherDetails(homePitcherRaw.id),
+            getPitcherDetails(awayPitcherRaw.id)
+          ]);
+
+          // Team Strings: "Kansas City Royals (36-54)"
+          const homeWins = homeTeam.leagueRecord?.wins ?? 0;
+          const homeLosses = homeTeam.leagueRecord?.losses ?? 0;
+          const awayWins = awayTeam.leagueRecord?.wins ?? 0;
+          const awayLosses = awayTeam.leagueRecord?.losses ?? 0;
+
+          const homeTeamFormatted = `${homeTeam.team?.name || "Home"} (${homeWins}-${homeLosses})`;
+          const awayTeamFormatted = `${awayTeam.team?.name || "Away"} (${awayWins}-${awayLosses})`;
+
+          // Pitcher Strings: "Noah Cameron (LHP, 5.04)"
+          let homePitcherFormatted = homePitcherRaw.fullName || "TBD";
+          if (homePitcherRaw.fullName) {
+            const extra = [homeDetails.hand, homeDetails.era].filter(Boolean).join(", ");
+            if (extra) homePitcherFormatted = `${homePitcherRaw.fullName} (${extra})`;
           }
+
+          let awayPitcherFormatted = awayPitcherRaw.fullName || "TBD";
+          if (awayPitcherRaw.fullName) {
+            const extra = [awayDetails.hand, awayDetails.era].filter(Boolean).join(", ");
+            if (extra) awayPitcherFormatted = `${awayPitcherRaw.fullName} (${extra})`;
+          }
+
+          matchups.push({
+            gamePk: game.gamePk.toString(),
+            home_team: homeTeamFormatted,
+            away_team: awayTeamFormatted,
+            home_pitcher: homePitcherFormatted,
+            away_pitcher: awayPitcherFormatted
+          });
         }
       }
     }
 
-    res.setHeader("Content-Type", "application/json");
-    res.json(matchups); // Output as array directly to simplify Apps Script mapping
+    res.json({ matchups });
+
   } catch (error) {
-    console.error("Stats Error:", error);
-    res.status(500).json({ error: "Stats Error" });
+    console.error("Stats Fetch Error:", error);
+    res.status(500).json({ error: "Failed to fetch stats", details: error.message });
   }
 });
 
+// START SERVER
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
