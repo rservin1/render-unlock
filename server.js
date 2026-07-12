@@ -1,4 +1,6 @@
 const express = require("express");
+const http = require("http");
+const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -6,7 +8,7 @@ const PORT = process.env.PORT || 10000;
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 const PARLAY_BASE_URL = "https://api.parlay-api.com";
 
-// Helper to map short sport aliases to Parlay API keys
+// Map short sport keys to full Parlay API keys
 function normalizeSportKey(key) {
   if (!key) return "baseball_mlb";
   const map = {
@@ -46,13 +48,12 @@ function formatToMST(utcString, timeOnly = false) {
   return dateObj.toLocaleString("en-US", options);
 }
 
-// Normalize team names
 function normalizeName(name) {
   if (!name) return "";
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Fetch official MLB schedule map
+// Fetch MLB schedule mapping
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -79,12 +80,12 @@ async function getMlbScheduleMap() {
     }
     return map;
   } catch (err) {
-    console.error("MLB map error:", err);
+    console.error("MLB schedule map error:", err.message);
     return {};
   }
 }
 
-// Extract markets and build clean game object
+// Transform game records
 function transformGameData(game, mlbMap = {}) {
   const homeTeam = game.home_team;
   const awayTeam = game.away_team;
@@ -174,7 +175,7 @@ function transformGameData(game, mlbMap = {}) {
   };
 }
 
-// Handler for Live Points Snapshot
+// REST Endpoint: Live Points Snapshot
 const handleLivePoints = async (req, res) => {
   try {
     const rawKey = req.params.sport_key || "baseball_mlb";
@@ -185,7 +186,7 @@ const handleLivePoints = async (req, res) => {
 
     if (!oddsRes.ok) {
       const errorText = await oddsRes.text();
-      console.error(`Parlay API error (${oddsRes.status}):`, errorText);
+      console.error(`Parlay API Error (${oddsRes.status}):`, errorText);
       return res.status(oddsRes.status).json({
         error: `Parlay API error (${oddsRes.status})`,
         details: errorText
@@ -213,59 +214,43 @@ const handleLivePoints = async (req, res) => {
       }))
     });
   } catch (err) {
-    console.error("Live points endpoint error:", err);
-    res.status(500).json({ error: "Failed to fetch live points data", details: err.message });
+    console.error("Live points error:", err.message);
+    res.status(500).json({ error: "Failed to fetch live points", details: err.message });
   }
 };
 
-// Endpoints
 app.get("/mlb", handleLivePoints);
 app.get("/v1/sports/:sport_key/live/points", handleLivePoints);
 
-// SSE Streaming Endpoint
-app.get("/v1/sports/:sport_key/live/sse", async (req, res) => {
+// SSE Streaming Proxy Endpoint
+app.get("/v1/sports/:sport_key/live/sse", (req, res) => {
   const rawKey = req.params.sport_key || "baseball_mlb";
   const sportKey = normalizeSportKey(rawKey);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  if (res.flushHeaders) res.flushHeaders();
 
-  const sseUrl = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/sse?apiKey=${PARLAY_API_KEY}`;
+  const targetUrl = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/sse?apiKey=${PARLAY_API_KEY}`;
 
-  try {
-    const upstreamRes = await fetch(sseUrl);
-
-    if (!upstreamRes.ok) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: "Failed to connect to upstream stream" })}\n\n`);
+  const proxyReq = https.get(targetUrl, (upstreamRes) => {
+    if (upstreamRes.statusCode !== 200) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: `Upstream error ${upstreamRes.statusCode}` })}\n\n`);
       return res.end();
     }
 
-    const reader = upstreamRes.body.getReader();
-    const decoder = new TextDecoder();
+    upstreamRes.pipe(res);
+  });
 
-    const readChunk = async () => {
-      try {
-        const { done, value } = await reader.read();
-        if (done) return res.end();
-        res.write(decoder.decode(value, { stream: true }));
-        readChunk();
-      } catch (streamErr) {
-        res.end();
-      }
-    };
-
-    readChunk();
-
-    req.on("close", () => {
-      reader.cancel().catch(() => {});
-    });
-  } catch (err) {
-    console.error("SSE error:", err);
+  proxyReq.on("error", (err) => {
+    console.error("SSE Proxy Error:", err.message);
     res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
     res.end();
-  }
+  });
+
+  req.on("close", () => {
+    proxyReq.destroy();
+  });
 });
 
 app.listen(PORT, () => {
