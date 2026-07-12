@@ -7,7 +7,6 @@ const PORT = process.env.PORT || 10000;
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 const PARLAY_BASE_URL = "https://api.parlay-api.com";
 
-// Map short sport aliases to full Parlay API keys
 function normalizeSportKey(key) {
   if (!key) return "baseball_mlb";
   const map = {
@@ -19,47 +18,27 @@ function normalizeSportKey(key) {
   return map[key.toLowerCase()] || key;
 }
 
-// Convert UTC timestamp → MST
 function formatToMST(utcString, timeOnly = false) {
   if (!utcString) return "";
   const dateObj = new Date(utcString);
   if (isNaN(dateObj.getTime())) return "";
 
   const options = timeOnly
-    ? {
-        timeZone: "America/Phoenix",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-        timeZoneName: "short"
-      }
-    : {
-        timeZone: "America/Phoenix",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-        timeZoneName: "short"
-      };
+    ? { timeZone: "America/Phoenix", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" }
+    : { timeZone: "America/Phoenix", year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" };
 
   return dateObj.toLocaleString("en-US", options);
 }
 
-// Normalize team names for matching
 function normalizeName(name) {
   if (!name) return "";
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Fetch official MLB schedule map
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
-    const res = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`
-    );
+    const res = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`);
     const data = await res.json();
 
     const map = {};
@@ -84,10 +63,9 @@ async function getMlbScheduleMap() {
   }
 }
 
-// Transform raw odds payload into normalized schema
 function transformGameData(game, mlbMap = {}) {
-  const homeTeam = game.home_team || "";
-  const awayTeam = game.away_team || "";
+  const homeTeam = game.home_team || game.homeTeam || "";
+  const awayTeam = game.away_team || game.awayTeam || "";
   const mlb = mlbMap[normalizeName(homeTeam)] || {};
 
   let dk = null;
@@ -95,7 +73,7 @@ function transformGameData(game, mlbMap = {}) {
 
   if (Array.isArray(game.bookmakers)) {
     game.bookmakers.forEach((bk) => {
-      const key = bk.key ? bk.key.toLowerCase() : "";
+      const key = (bk.key || bk.title || "").toLowerCase();
       if (key.includes("draftkings")) dk = bk;
       if (key.includes("betmgm") || key.includes("mgm")) mgm = bk;
     });
@@ -121,14 +99,16 @@ function transformGameData(game, mlbMap = {}) {
   const dkData = extractMarkets(dk);
   const mgmData = extractMarkets(mgm);
 
+  const gameDate = game.commence_time || game.gameDate || new Date().toISOString();
+
   return {
     gamePk: mlb.gamePk || game.id || "",
     gameGuid: game.id || "",
     gameType: "R",
     season: new Date().getFullYear().toString(),
-    gameDate: game.commence_time,
-    gameDateMST: formatToMST(game.commence_time),
-    gameTimeMST: formatToMST(game.commence_time, true),
+    gameDate: gameDate,
+    gameDateMST: formatToMST(gameDate),
+    gameTimeMST: formatToMST(gameDate, true),
 
     status: {
       abstractGameState: mlb.abstractState || "Preview",
@@ -172,7 +152,6 @@ function transformGameData(game, mlbMap = {}) {
   };
 }
 
-// Helper to handle Parlay requests
 async function fetchAndTransform(endpointUrl, rawSportKey, res) {
   try {
     const sportKey = normalizeSportKey(rawSportKey);
@@ -190,9 +169,11 @@ async function fetchAndTransform(endpointUrl, rawSportKey, res) {
     const mlbMap = sportKey.includes("mlb") ? await getMlbScheduleMap() : {};
     const gamesByDate = {};
 
+    const todayStr = new Date().toISOString().split("T")[0];
+
     if (Array.isArray(oddsJson)) {
       oddsJson.forEach((game) => {
-        const dateStr = game.commence_time ? game.commence_time.split("T")[0] : "Unknown";
+        const dateStr = game.commence_time ? game.commence_time.split("T")[0] : todayStr;
         const formattedGame = transformGameData(game, mlbMap);
 
         if (!gamesByDate[dateStr]) gamesByDate[dateStr] = [];
@@ -212,77 +193,35 @@ async function fetchAndTransform(endpointUrl, rawSportKey, res) {
   }
 }
 
-// -------------------------------------------------------------
-// ROUTES
-// -------------------------------------------------------------
-
-// 1. Official MLB Stats / Schedule Endpoint (Fixes 404 in Excel)
+// Routes
 app.get("/stats", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
     const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`;
     const response = await fetch(mlbUrl);
-
-    if (!response.ok) {
-      return res.status(response.status).json({ error: `MLB Stats API error (${response.status})` });
-    }
-
+    if (!response.ok) return res.status(response.status).json({ error: `MLB Stats API error (${response.status})` });
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error("Stats route error:", err.message);
     res.status(500).json({ error: "Failed to fetch MLB stats", details: err.message });
   }
 });
 
-// 2. Live/In-Play Points Endpoints
 app.get("/mlb", (req, res) => {
-  const url = `${PARLAY_BASE_URL}/v1/sports/baseball_mlb/live/points?apiKey=${PARLAY_API_KEY}`;
+  const url = `${PARLAY_BASE_URL}/v1/sports/baseball_mlb/odds?apiKey=${PARLAY_API_KEY}&regions=us&markets=h2h,spreads,totals`;
   fetchAndTransform(url, "baseball_mlb", res);
 });
 
-app.get("/v1/sports/:sport_key/live/points", (req, res) => {
-  const sportKey = normalizeSportKey(req.params.sport_key);
-  const url = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/points?apiKey=${PARLAY_API_KEY}`;
-  fetchAndTransform(url, sportKey, res);
-});
-
-// 3. Pre-Game / Upcoming Odds Endpoint
 app.get("/v1/sports/:sport_key/odds", (req, res) => {
   const sportKey = normalizeSportKey(req.params.sport_key);
   const url = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/odds?apiKey=${PARLAY_API_KEY}&regions=us&markets=h2h,spreads,totals`;
   fetchAndTransform(url, sportKey, res);
 });
 
-// 4. SSE Stream Proxy Endpoint
-app.get("/v1/sports/:sport_key/live/sse", async (req, res) => {
+app.get("/v1/sports/:sport_key/live/points", (req, res) => {
   const sportKey = normalizeSportKey(req.params.sport_key);
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  const sseUrl = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/sse?apiKey=${PARLAY_API_KEY}`;
-
-  try {
-    const upstreamRes = await fetch(sseUrl);
-
-    if (!upstreamRes.ok) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: `Upstream error ${upstreamRes.status}` })}\n\n`);
-      return res.end();
-    }
-
-    upstreamRes.body.on("data", (chunk) => res.write(chunk));
-    upstreamRes.body.on("end", () => res.end());
-
-    req.on("close", () => {
-      if (upstreamRes.body.destroy) upstreamRes.body.destroy();
-    });
-  } catch (err) {
-    console.error("SSE error:", err.message);
-    res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
-    res.end();
-  }
+  const url = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/live/points?apiKey=${PARLAY_API_KEY}`;
+  fetchAndTransform(url, sportKey, res);
 });
 
 app.listen(PORT, () => {
