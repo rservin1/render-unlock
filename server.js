@@ -260,3 +260,22 @@ app.get("/stats", async (req, res) => {
             away_team: awayTeamFormatted,
 
             home_pitcher: homePitcherFormatted,
+            away_pitcher: awayPitcherFormatted,
+
+            home_pitcher_id: homePitcherRaw.id || null,
+            away_pitcher_id: awayPitcherRaw.id || null
+          });
+        }
+      }
+    }
+
+    res.json({ matchups });
+  } catch (err) {
+    console.error("Stats Fetch Error:", err);
+    res.status(500).json({ error: "Failed to fetch stats", details: err.message });
+  }
+});
+
+app.listen(PORT, () =>
+  console.log(`Server running on port ${PORT}`)
+);
