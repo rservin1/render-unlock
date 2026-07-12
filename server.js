@@ -20,8 +20,8 @@ function getDateStr(offsetDays = 0) {
   return d.toISOString().split("T")[0];
 }
 
-// Fetch 3 days of MLB Schedule to prevent UTC timezone mismatches
-async function getMlbScheduleMap() {
+// Fetch 3 days of MLB Schedule to handle timezone crossovers
+async function getMlbScheduleList() {
   try {
     const startDate = getDateStr(-1); // Yesterday
     const endDate = getDateStr(1);   // Tomorrow
@@ -30,17 +30,19 @@ async function getMlbScheduleMap() {
       `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&hydrate=linescore,venue`
     );
     const data = await res.json();
-    const map = {};
+    const gamesList = [];
 
     if (data.dates) {
       data.dates.forEach((d) => {
         if (d.games) {
           d.games.forEach((g) => {
             const normHome = normalizeName(g.teams?.home?.team?.name);
-            const gameDate = g.officialDate || d.date;
-            const key = `${gameDate}_${normHome}`;
+            const normAway = normalizeName(g.teams?.away?.team?.name);
 
-            map[key] = {
+            gamesList.push({
+              normHome,
+              normAway,
+              officialDate: g.officialDate || d.date,
               gamePk: g.gamePk.toString(),
               gameGuid: g.gameGuid || "N/A",
               gameType: g.gameType || "R",
@@ -55,15 +57,15 @@ async function getMlbScheduleMap() {
                 currentInning: g.linescore?.currentInning || 0,
                 inningHalf: g.linescore?.inningHalf || "None"
               }
-            };
+            });
           });
         }
       });
     }
-    return map;
+    return gamesList;
   } catch (err) {
     console.error("MLB Schedule Fetch Error:", err);
-    return {};
+    return [];
   }
 }
 
@@ -87,14 +89,14 @@ async function getPitcherDetails(pitcherId) {
 // GET /mlb Endpoint
 app.get("/mlb", async (req, res) => {
   try {
-    const [oddsRes, parlayRes, mlbMap] = await Promise.all([
+    const [oddsRes, parlayRes, mlbGamesList] = await Promise.all([
       fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`)
         .then((r) => (r.ok ? r.json() : []))
         .catch(() => []),
       fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`)
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
-      getMlbScheduleMap()
+      getMlbScheduleList()
     ]);
 
     const gamesByDate = {};
@@ -102,10 +104,12 @@ app.get("/mlb", async (req, res) => {
     oddsRes.forEach((game) => {
       const gameDateStr = game.commence_time?.split("T")[0] || getDateStr(0);
       const normHome = normalizeName(game.home_team);
-      const lookupKey = `${gameDateStr}_${normHome}`;
-      
-      // Attempt date-specific match first, then fallback to name match
-      const matchedMlb = mlbMap[lookupKey] || Object.values(mlbMap).find((m) => m.gamePk === game.id);
+      const normAway = normalizeName(game.away_team);
+
+      // Flexible matching: Match home team first, or fallback to away team match
+      const matchedMlb = mlbGamesList.find(
+        (m) => m.normHome === normHome || m.normAway === normAway
+      );
 
       const homeScore = game.scores?.find((s) => s.name === game.home_team)?.score || 0;
       const awayScore = game.scores?.find((s) => s.name === game.away_team)?.score || 0;
