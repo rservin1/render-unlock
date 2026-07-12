@@ -12,7 +12,7 @@ function normalizeName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Fetch official MLB schedule map
+// Fetch official MLB schedule map WITH probable pitchers
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -33,7 +33,6 @@ async function getMlbScheduleMap() {
             detailedState: g.status.detailedState,
             statusCode: g.status.statusCode,
 
-            // ⭐ Pitcher IDs added here ⭐
             homePitcherId: g.teams?.home?.probablePitcher?.id || null,
             awayPitcherId: g.teams?.away?.probablePitcher?.id || null
           };
@@ -76,11 +75,10 @@ async function getPitcherDetails(pitcherId) {
 }
 
 // ===============================
-// MAIN ENDPOINT: /mlb
+// ENDPOINT: /mlb
 // ===============================
 app.get("/mlb", async (req, res) => {
   try {
-    // LIVE ODDS (DraftKings + MGM only)
     const oddsUrl = `https://api.parlay-api.com/v1/sports/baseball_mlb/live/points?apiKey=${PARLAY_API_KEY}`;
     const oddsRes = await fetch(oddsUrl);
     const oddsJson = await oddsRes.json();
@@ -98,7 +96,6 @@ app.get("/mlb", async (req, res) => {
       const normHome = normalizeName(homeTeam);
       const mlb = mlbMap[normHome] || {};
 
-      // Extract ONLY MGM + DraftKings
       let dk = null;
       let mgm = null;
 
@@ -110,7 +107,6 @@ app.get("/mlb", async (req, res) => {
         });
       }
 
-      // Extract markets
       const extractMarkets = (book) => {
         if (!book || !Array.isArray(book.markets)) return {};
 
@@ -164,11 +160,9 @@ app.get("/mlb", async (req, res) => {
           name: `${homeTeam} Stadium`
         },
 
-        // ⭐ Pitcher IDs added directly into /mlb ⭐
         home_pitcher_id: mlb.homePitcherId || null,
         away_pitcher_id: mlb.awayPitcherId || null,
 
-        // ONLY MGM + DraftKings
         parlayData: {
           draftkings_ml_away: dkData.mlAway,
           draftkings_ml_home: dkData.mlHome,
@@ -203,7 +197,7 @@ app.get("/mlb", async (req, res) => {
 });
 
 // ===============================
-// ENDPOINT: /stats (Pitcher IDs)
+// ENDPOINT: /stats (ALWAYS RETURNS matchups ARRAY)
 // ===============================
 app.get("/stats", async (req, res) => {
   try {
@@ -262,26 +256,4 @@ app.get("/stats", async (req, res) => {
 
           matchups.push({
             gamePk: game.gamePk.toString(),
-            home_team: homeTeamFormatted,
-            away_team: awayTeamFormatted,
-
-            home_pitcher: homePitcherFormatted,
-            away_pitcher: awayPitcherFormatted,
-
-            home_pitcher_id: homePitcherRaw.id || null,
-            away_pitcher_id: awayPitcherRaw.id || null
-          });
-        }
-      }
-    }
-
-    res.json({ matchups });
-  } catch (err) {
-    console.error("Stats Fetch Error:", err);
-    res.status(500).json({ error: "Failed to fetch stats", details: err.message });
-  }
-});
-
-app.listen(PORT, () =>
-  console.log(`Server running on port ${PORT}`)
-);
+            home_team: home
