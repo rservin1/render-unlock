@@ -212,7 +212,30 @@ async function fetchAndTransform(endpointUrl, rawSportKey, res) {
   }
 }
 
-// 1. Live/In-Play Points Endpoint
+// -------------------------------------------------------------
+// ROUTES
+// -------------------------------------------------------------
+
+// 1. Official MLB Stats / Schedule Endpoint (Fixes 404 in Excel)
+app.get("/stats", async (req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const mlbUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`;
+    const response = await fetch(mlbUrl);
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: `MLB Stats API error (${response.status})` });
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error("Stats route error:", err.message);
+    res.status(500).json({ error: "Failed to fetch MLB stats", details: err.message });
+  }
+});
+
+// 2. Live/In-Play Points Endpoints
 app.get("/mlb", (req, res) => {
   const url = `${PARLAY_BASE_URL}/v1/sports/baseball_mlb/live/points?apiKey=${PARLAY_API_KEY}`;
   fetchAndTransform(url, "baseball_mlb", res);
@@ -224,14 +247,14 @@ app.get("/v1/sports/:sport_key/live/points", (req, res) => {
   fetchAndTransform(url, sportKey, res);
 });
 
-// 2. Pre-game / Upcoming Odds Endpoint
+// 3. Pre-Game / Upcoming Odds Endpoint
 app.get("/v1/sports/:sport_key/odds", (req, res) => {
   const sportKey = normalizeSportKey(req.params.sport_key);
   const url = `${PARLAY_BASE_URL}/v1/sports/${sportKey}/odds?apiKey=${PARLAY_API_KEY}&regions=us&markets=h2h,spreads,totals`;
   fetchAndTransform(url, sportKey, res);
 });
 
-// 3. SSE Stream Proxy Endpoint
+// 4. SSE Stream Proxy Endpoint
 app.get("/v1/sports/:sport_key/live/sse", async (req, res) => {
   const sportKey = normalizeSportKey(req.params.sport_key);
 
