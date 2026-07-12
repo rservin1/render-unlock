@@ -137,4 +137,68 @@ app.get("/mlb", async (req, res) => {
         gameGuid: game.id || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
-        gameDate: game.comm
+        gameDate: game.commence_time,
+        gameDateMST: formatToMST(game.commence_time),
+        gameTimeMST: formatToMST(game.commence_time, true),
+
+        status: {
+          abstractGameState: mlb.abstractState || "Preview",
+          detailedState: mlb.detailedState || "Scheduled",
+          statusCode: mlb.statusCode || "S"
+        },
+
+        teams: {
+          away: {
+            score: 0,
+            isWinner: false,
+            team: { id: awayTeam, name: awayTeam }
+          },
+          home: {
+            score: 0,
+            isWinner: false,
+            team: { id: homeTeam, name: homeTeam }
+          }
+        },
+
+        venue: {
+          id: 0,
+          name: `${homeTeam} Stadium`
+        },
+
+        // ONLY MGM + DraftKings
+        parlayData: {
+          draftkings_ml_away: dkData.mlAway,
+          draftkings_ml_home: dkData.mlHome,
+          draftkings_spread_away: dkData.spreadAway,
+          draftkings_spread_home: dkData.spreadHome,
+          draftkings_total_over: dkData.totalOver,
+          draftkings_total_under: dkData.totalUnder,
+
+          mgm_ml_away: mgmData.mlAway,
+          mgm_ml_home: mgmData.mlHome,
+          mgm_spread_away: mgmData.spreadAway,
+          mgm_spread_home: mgmData.spreadHome,
+          mgm_total_over: mgmData.totalOver,
+          mgm_total_under: mgmData.totalUnder
+        }
+      };
+
+      if (!gamesByDate[dateStr]) gamesByDate[dateStr] = [];
+      gamesByDate[dateStr].push(formattedGame);
+    });
+
+    res.json({
+      dates: Object.keys(gamesByDate).map((d) => ({
+        date: d,
+        games: gamesByDate[d]
+      }))
+    });
+  } catch (err) {
+    console.error("MLB endpoint error:", err);
+    res.status(500).json({ error: "MLB endpoint failed", details: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
