@@ -1,19 +1,20 @@
 import express from "express";
 import fetch from "node-fetch";
 
+// 1. INITIALIZE EXPRESS FIRST
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
 
-// Helper: Normalize team names for strict matching (removes spaces, punctuation, lowercase)
+// Helper: Normalize team names
 function normalizeName(name) {
   if (!name) return "";
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Helper: Fetch live official MLB game statuses & numeric gamePk map
+// Helper: Fetch live official MLB game statuses & gamePk map
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -41,7 +42,7 @@ async function getMlbScheduleMap() {
   }
 }
 
-// Helper: Fetch Pitcher Hand (LHP/RHP) and ERA via person API endpoint
+// Helper: Fetch Pitcher Hand and ERA
 async function getPitcherDetails(pitcherId) {
   if (!pitcherId) return { hand: "", era: "" };
   try {
@@ -51,11 +52,9 @@ async function getPitcherDetails(pitcherId) {
 
     const person = data.people?.[0] || {};
     
-    // Pitching Hand
     const handCode = person.pitchHand?.code || "";
     const handStr = handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : "");
 
-    // ERA
     let eraStr = "";
     const splits = person.stats?.[0]?.splits;
     if (splits && splits.length > 0 && splits[0].stat?.era) {
@@ -208,7 +207,7 @@ app.get("/stats", async (req, res) => {
           const homePitcherRaw = homeTeam.probablePitcher || {};
           const awayPitcherRaw = awayTeam.probablePitcher || {};
 
-          // Fetch Hand and ERA in parallel for both starters
+          // Fetch Hand and ERA in parallel
           const [homeDetails, awayDetails] = await Promise.all([
             getPitcherDetails(homePitcherRaw.id),
             getPitcherDetails(awayPitcherRaw.id)
@@ -223,7 +222,7 @@ app.get("/stats", async (req, res) => {
           const homeTeamFormatted = `${homeTeam.team?.name || "Home"} (${homeWins}-${homeLosses})`;
           const awayTeamFormatted = `${awayTeam.team?.name || "Away"} (${awayWins}-${awayLosses})`;
 
-          // Pitcher Strings: "Noah Cameron (LHP, 5.04)" or "TBD"
+          // Pitcher Strings: "Noah Cameron (LHP, 5.04)"
           let homePitcherFormatted = homePitcherRaw.fullName || "TBD";
           if (homePitcherRaw.fullName) {
             const extra = [homeDetails.hand, homeDetails.era].filter(Boolean).join(", ");
@@ -255,4 +254,5 @@ app.get("/stats", async (req, res) => {
   }
 });
 
+// START SERVER
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
