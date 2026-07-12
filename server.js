@@ -75,7 +75,27 @@ async function getPitcherDetails(pitcherId) {
 }
 
 // ===============================
-// ENDPOINT: /mlb
+// DEBUG ENDPOINT — shows ParlayAPI format
+// ===============================
+app.get("/debug-odds", async (req, res) => {
+  try {
+    const oddsUrl = `https://api.parlay-api.com/v1/sports/baseball_mlb/live/points?apiKey=${PARLAY_API_KEY}`;
+    const oddsRes = await fetch(oddsUrl);
+    const oddsJson = await oddsRes.json();
+
+    res.json({
+      typeof: typeof oddsJson,
+      isArray: Array.isArray(oddsJson),
+      keys: Object.keys(oddsJson || {}),
+      sample: oddsJson
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+// ===============================
+// ENDPOINT: /mlb (SAFE VERSION)
 // ===============================
 app.get("/mlb", async (req, res) => {
   try {
@@ -83,11 +103,25 @@ app.get("/mlb", async (req, res) => {
     const oddsRes = await fetch(oddsUrl);
     const oddsJson = await oddsRes.json();
 
-    const mlbMap = await getMlbScheduleMap();
+    // ⭐ SAFETY CHECK: Ensure oddsJson is an array
+    let games = [];
 
+    if (Array.isArray(oddsJson)) {
+      games = oddsJson;
+    } else if (Array.isArray(oddsJson?.data)) {
+      games = oddsJson.data;
+    } else {
+      console.error("Unexpected ParlayAPI format:", oddsJson);
+      return res.status(500).json({
+        error: "MLB endpoint failed",
+        details: "ParlayAPI returned unexpected format"
+      });
+    }
+
+    const mlbMap = await getMlbScheduleMap();
     const gamesByDate = {};
 
-    oddsJson.forEach((game) => {
+    games.forEach((game) => {
       const dateStr = game.commence_time.split("T")[0];
 
       const homeTeam = game.home_team;
