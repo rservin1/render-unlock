@@ -12,7 +12,6 @@ function normalizeName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-// Updated with defensive linescore check to prevent 500 errors
 async function getMlbScheduleMap() {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -29,7 +28,6 @@ async function getMlbScheduleMap() {
             abstractState: g.status.abstractGameState,
             detailedState: g.status.detailedState,
             statusCode: g.status.statusCode,
-            // Safety check: only assign linescore if it exists, otherwise null
             linescore: g.linescore || null 
           };
         }
@@ -72,59 +70,34 @@ app.get("/mlb", async (req, res) => {
     ]);
 
     let oddsData = [];
-    if (oddsRes.status === "fulfilled" && oddsRes.value.ok) {
-      oddsData = await oddsRes.value.json();
-    }
+    if (oddsRes.status === "fulfilled" && oddsRes.value.ok) oddsData = await oddsRes.value.json();
 
     let parlayData = null;
-    if (parlayRes.status === "fulfilled" && parlayRes.value.ok) {
-      parlayData = await parlayRes.value.json().catch(() => null);
-    }
+    if (parlayRes.status === "fulfilled" && parlayRes.value.ok) parlayData = await parlayRes.value.json().catch(() => null);
 
     const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
 
-    if (!Array.isArray(oddsData)) {
-      return res.status(400).json({ error: "Odds API Error", details: oddsData });
-    }
+    if (!Array.isArray(oddsData)) return res.status(400).json({ error: "Odds API Error" });
 
     const gamesByDate = {};
     oddsData.forEach((game) => {
       const gameDateStr = game.commence_time ? game.commence_time.split("T")[0] : "1970-01-01";
-      let homeScore = 0;
-      let awayScore = 0;
-
-      if (Array.isArray(game.scores)) {
-        const homeObj = game.scores.find((s) => s.name === game.home_team);
-        const awayObj = game.scores.find((s) => s.name === game.away_team);
-        if (homeObj && homeObj.score !== undefined) homeScore = parseInt(homeObj.score, 10) || 0;
-        if (awayObj && awayObj.score !== undefined) awayScore = parseInt(awayObj.score, 10) || 0;
-      }
-
-      const homeWinner = game.completed && homeScore > awayScore;
-      const awayWinner = game.completed && awayScore > homeScore;
+      const homeScore = game.scores?.find(s => s.name === game.home_team)?.score || 0;
+      const awayScore = game.scores?.find(s => s.name === game.away_team)?.score || 0;
       const parlayInfo = Array.isArray(parlayData) ? parlayData.find((p) => p.home_team === game.home_team || p.id === game.id) || null : null;
       const normHome = normalizeName(game.home_team);
       const matchedMlb = mlbMap[normHome];
 
       const formattedGame = {
         gamePk: matchedMlb ? matchedMlb.gamePk : (game.id || "000000"),
-        gameGuid: game.id || "",
-        gameType: "R",
-        season: new Date().getFullYear().toString(),
         gameDate: game.commence_time || "",
-        dayNight: "day",
-        scheduledInnings: 9,
         status: {
-          abstractGameState: matchedMlb ? matchedMlb.abstractState : (game.completed ? "Final" : (game.scores ? "Live" : "Preview")),
-          detailedState: matchedMlb ? matchedMlb.detailedState : (game.completed ? "Final" : (game.scores ? "In Progress" : "Scheduled")),
-          statusCode: matchedMlb ? matchedMlb.statusCode : (game.completed ? "F" : (game.scores ? "I" : "S"))
+          abstractGameState: matchedMlb ? matchedMlb.abstractState : (game.completed ? "Final" : "Live"),
+          detailedState: matchedMlb ? matchedMlb.detailedState : "In Progress",
+          statusCode: matchedMlb ? matchedMlb.statusCode : "I"
         },
-        teams: {
-          away: { score: awayScore, isWinner: awayWinner, team: { id: game.away_team || "Away", name: game.away_team ? game.away_team.trim() : "Away Team" } },
-          home: { score: homeScore, isWinner: homeWinner, team: { id: game.home_team || "Home", name: game.home_team ? game.home_team.trim() : "Home Team" } }
-        },
-        venue: { id: 0, name: game.home_team ? `${game.home_team.trim()} Stadium` : "MLB Venue" },
-        linescore: matchedMlb ? matchedMlb.linescore : null, // Successfully passing data to Power Query
+        teams: { away: { score: awayScore, team: { name: game.away_team } }, home: { score: homeScore, team: { name: game.home_team } } },
+        linescore: matchedMlb ? matchedMlb.linescore : null,
         parlayData: parlayInfo
       };
 
@@ -132,12 +105,38 @@ app.get("/mlb", async (req, res) => {
       gamesByDate[gameDateStr].push(formattedGame);
     });
 
-    res.json({ dates: Object.keys(gamesByDate).map((dateKey) => ({ date: dateKey, games: gamesByDate[dateKey] })) });
+    res.json({ dates: Object.keys(gamesByDate).map((d) => ({ date: d, games: gamesByDate[d] })) });
   } catch (error) {
     res.status(500).json({ error: "Proxy Failed", details: error.message });
   }
 });
 
-app.get("/stats", async (req, res) => { /* ... existing stats code ... */ });
+app.get("/stats", async (req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const mlbRes = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&hydrate=probablePitcher`);
+    const mlbData = await mlbRes.json();
+    const matchups = [];
+
+    if (mlbData.dates?.[0]?.games) {
+      for (const game of mlbData.dates[0].games) {
+        const [homeDetails, awayDetails] = await Promise.all([
+          getPitcherDetails(game.teams?.home?.probablePitcher?.id),
+          getPitcherDetails(game.teams?.away?.probablePitcher?.id)
+        ]);
+        matchups.push({
+          gamePk: game.gamePk.toString(),
+          home_team: game.teams?.home?.team?.name,
+          away_team: game.teams?.away?.team?.name,
+          home_pitcher: `${game.teams?.home?.probablePitcher?.fullName || "TBD"} (${[homeDetails.hand, homeDetails.era].filter(Boolean).join(", ")})`,
+          away_pitcher: `${game.teams?.away?.probablePitcher?.fullName || "TBD"} (${[awayDetails.hand, awayDetails.era].filter(Boolean).join(", ")})`
+        });
+      }
+    }
+    res.json({ matchups });
+  } catch (error) {
+    res.status(500).json({ error: "Stats Failed" });
+  }
+});
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
