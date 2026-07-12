@@ -1,12 +1,40 @@
 import express from "express";
 import fetch from "node-fetch";
 
-// 1. INITIALIZE EXPRESS FIRST
+// 1. INITIALIZE EXPRESS
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
 const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
+
+// Helper: Convert UTC string to Mountain Standard Time (MST/MDT - Phoenix/Denver)
+function formatToMST(utcString, timeOnly = false) {
+  if (!utcString) return "";
+  const dateObj = new Date(utcString);
+  if (isNaN(dateObj.getTime())) return "";
+
+  const options = timeOnly
+    ? {
+        timeZone: "America/Phoenix",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+        timeZoneName: "short"
+      }
+    : {
+        timeZone: "America/Phoenix",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+        timeZoneName: "short"
+      };
+
+  return dateObj.toLocaleString("en-US", options);
+}
 
 // Helper: Normalize team names
 function normalizeName(name) {
@@ -20,7 +48,7 @@ async function getMlbScheduleMap() {
     const today = new Date().toISOString().split("T")[0];
     const res = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}`);
     const data = await res.json();
-    
+
     const map = {};
     if (data.dates && data.dates.length > 0) {
       data.dates[0].games.forEach((g) => {
@@ -30,7 +58,8 @@ async function getMlbScheduleMap() {
             gamePk: g.gamePk.toString(),
             abstractState: g.status.abstractGameState,
             detailedState: g.status.detailedState,
-            statusCode: g.status.statusCode
+            statusCode: g.status.statusCode,
+            gameDateUtc: g.gameDate
           };
         }
       });
@@ -42,16 +71,26 @@ async function getMlbScheduleMap() {
   }
 }
 
-// Helper: Fetch Pitcher Hand and ERA
-async function getPitcherDetails(pitcherId) {
-  if (!pitcherId) return { hand: "", era: "" };
-  try {
-    const url = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
-    const res = await fetch(url);
-    const data = await res.json();
+// Helper: Fetch Pitcher Hand, Season ERA, and 90-Day Historical Analytics
+async function getPitcherDetails(pitcherId, opponentTeamId = null) {
+  if (!pitcherId) {
+    return { 
+      hand: "", 
+      era: "", 
+      eraVsLhb: null, 
+      eraVsRhb: null, 
+      eraVsOpponent: null, 
+      avgInningsPitched: null 
+    };
+  }
 
-    const person = data.people?.[0] || {};
-    
+  try {
+    // 1. Fetch Basic Bio & Season Stats
+    const bioUrl = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
+    const bioRes = await fetch(bioUrl);
+    const bioData = await bioRes.json();
+
+    const person = bioData.people?.[0] || {};
     const handCode = person.pitchHand?.code || "";
     const handStr = handCode === "L" ? "LHP" : (handCode === "R" ? "RHP" : "");
 
@@ -61,10 +100,71 @@ async function getPitcherDetails(pitcherId) {
       eraStr = splits[0].stat.era;
     }
 
-    return { hand: handStr, era: eraStr };
+    // 2. Fetch 90-Day Historical Data (Range-based Query)
+    const todayObj = new Date();
+    const ninetyDaysAgoObj = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    const endDate = todayObj.toISOString().split("T")[0];
+    const startDate = ninetyDaysAgoObj.toISOString().split("T")[0];
+
+    const historicalUrl = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=[byDateRange],startDate=${startDate},endDate=${endDate},subtypes=[statSplits])`;
+    const histRes = await fetch(historicalUrl);
+    const histData = await histRes.json();
+
+    let eraVsLhb = null;
+    let eraVsRhb = null;
+    let eraVsOpponent = null;
+    let avgInningsPitched = null;
+
+    const histSplits = histData.people?.[0]?.stats?.[0]?.splits || [];
+
+    // Extract Game Stats & Outing Lengths
+    let totalInnings = 0;
+    let gamesStarted = 0;
+
+    histSplits.forEach((split) => {
+      const stat = split.stat;
+      if (!stat) return;
+
+      // Track Innings / Game for Outing Length
+      if (stat.gamesStarted) gamesStarted += stat.gamesStarted;
+      if (stat.inningsPitched) totalInnings += parseFloat(stat.inningsPitched);
+
+      // Extract Batter Hand Splits
+      if (split.split?.code === "vl" || split.split?.description === "vs Left") {
+        eraVsLhb = stat.era || null;
+      } else if (split.split?.code === "vr" || split.split?.description === "vs Right") {
+        eraVsRhb = stat.era || null;
+      }
+
+      // Match Opposing Team Performance
+      if (opponentTeamId && split.opponent?.id === opponentTeamId) {
+        eraVsOpponent = stat.era || null;
+      }
+    });
+
+    if (gamesStarted > 0) {
+      avgInningsPitched = (totalInnings / gamesStarted).toFixed(1);
+    }
+
+    return { 
+      hand: handStr, 
+      era: eraStr, 
+      eraVsLhb, 
+      eraVsRhb, 
+      eraVsOpponent, 
+      avgInningsPitched 
+    };
+
   } catch (err) {
     console.error(`Error fetching details for pitcher ${pitcherId}:`, err);
-    return { hand: "", era: "" };
+    return { 
+      hand: "", 
+      era: "", 
+      eraVsLhb: null, 
+      eraVsRhb: null, 
+      eraVsOpponent: null, 
+      avgInningsPitched: null 
+    };
   }
 }
 
@@ -134,6 +234,8 @@ app.get("/mlb", async (req, res) => {
         gameType: "R",
         season: new Date().getFullYear().toString(),
         gameDate: game.commence_time || "",
+        gameDateMST: formatToMST(game.commence_time),      // Full MST timestamp
+        gameTimeMST: formatToMST(game.commence_time, true),// Clean MST time (e.g., "1:06 PM MST")
         dayNight: "day",
         scheduledInnings: 9,
         status: {
@@ -207,10 +309,13 @@ app.get("/stats", async (req, res) => {
           const homePitcherRaw = homeTeam.probablePitcher || {};
           const awayPitcherRaw = awayTeam.probablePitcher || {};
 
-          // Fetch Hand and ERA in parallel
+          const homeTeamId = homeTeam.team?.id || null;
+          const awayTeamId = awayTeam.team?.id || null;
+
+          // Fetch Hand, ERA, and 90-Day Analytics in parallel
           const [homeDetails, awayDetails] = await Promise.all([
-            getPitcherDetails(homePitcherRaw.id),
-            getPitcherDetails(awayPitcherRaw.id)
+            getPitcherDetails(homePitcherRaw.id, awayTeamId),
+            getPitcherDetails(awayPitcherRaw.id, homeTeamId)
           ]);
 
           // Team Strings: "Kansas City Royals (36-54)"
@@ -237,10 +342,32 @@ app.get("/stats", async (req, res) => {
 
           matchups.push({
             gamePk: game.gamePk.toString(),
+            game_date_utc: game.gameDate || "",
+            game_time_mst: formatToMST(game.gameDate, true), // Clean MST game time
             home_team: homeTeamFormatted,
             away_team: awayTeamFormatted,
+            
+            // Raw IDs for reliable Power Query joining
+            home_pitcher_id: homePitcherRaw.id ? homePitcherRaw.id.toString() : null,
+            away_pitcher_id: awayPitcherRaw.id ? awayPitcherRaw.id.toString() : null,
+            
+            // Formatted Strings
             home_pitcher: homePitcherFormatted,
-            away_pitcher: awayPitcherFormatted
+            away_pitcher: awayPitcherFormatted,
+
+            // 90-Day Analytics Splits
+            home_pitcher_stats_90d: {
+              era_vs_lhb: homeDetails.eraVsLhb,
+              era_vs_rhb: homeDetails.eraVsRhb,
+              era_vs_opponent: homeDetails.eraVsOpponent,
+              avg_innings_pitched: homeDetails.avgInningsPitched
+            },
+            away_pitcher_stats_90d: {
+              era_vs_lhb: awayDetails.eraVsLhb,
+              era_vs_rhb: awayDetails.eraVsRhb,
+              era_vs_opponent: awayDetails.eraVsOpponent,
+              avg_innings_pitched: awayDetails.avgInningsPitched
+            }
           });
         }
       }
@@ -254,5 +381,6 @@ app.get("/stats", async (req, res) => {
   }
 });
 
-// START SERVER
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
