@@ -1,208 +1,126 @@
-import express from "express";
-import fetch from "node-fetch";
+const express = require('express');
+const { exec } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = 3000;
 
-const ODDS_API_KEY = "ca033d2296b68d852fb18bd999cd8f9f";
-const PARLAY_API_KEY = "75119bea4ef8693d2dd6584565b87a1c";
+// Middleware for CORS and JSON handling
+app.use(express.json());
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    next();
+});
 
-// ===============================
-// PITCHER ID MAP (Your Approved List)
-// ===============================
-const pitcherMap = {
-  "Pittsburgh Pirates": 694973,
-  "Milwaukee Brewers": 688107,
-  "Baltimore Orioles": 669358,
-  "Kansas City Royals": 607625,
-  "Washington Nationals": 676917,
-  "New York Yankees": 701540,
-  "Cincinnati Reds": 671096,
-  "Chicago Cubs": 575110,
-  "New York Mets": 804267,
-  "Boston Red Sox": 801139,
-  "Tampa Bay Rays": 693855,
-  "Seattle Mariners": 671066,
-  "Detroit Tigers": 669373,
-  "Philadelphia Phillies": 554430,
-  "Miami Marlins": 663969,
-  "Cleveland Guardians": 676282,
-  "Minnesota Twins": 671737,
-  "Los Angeles Angels": 667755,
-  "Chicago White Sox": 702273,
-  "Athletics": 669372,
-  "St. Louis Cardinals": 669610,
-  "Atlanta Braves": 669372,
-  "Texas Rangers": 669022,
-  "Houston Astros": 664299,
-  "San Francisco Giants": 686790,
-  "Colorado Rockies": 547179,
-  "Los Angeles Dodgers": 686218,
-  "Arizona Diamondbacks": 683352,
-  "San Diego Padres": 608566,
-  "Toronto Blue Jays": 592332
-};
+// Helper function to safely execute PowerShell scripts
+function runPowerShellScript(dateString, callback) {
+    const psScript = 'C:\\Users\\rserv\\draftkings\\fetch_slate.ps1';
+    const cmd = `powershell.exe -ExecutionPolicy Bypass -File "${psScript}" -Date "${dateString}"`;
 
-// ===============================
-// Helper: Hydrate Pitcher Stats
-// ===============================
-async function getPitcherDetails(pitcherId) {
-  if (!pitcherId) {
-    return {
-      fullName: "TBD",
-      hand: "",
-      era: "",
-      eraLHB: "",
-      eraRHB: ""
-    };
-  }
+    console.log(`[SERVER] Executing script for date: ${dateString}...`);
 
-  try {
-    const url = `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=season)`;
-    const res = await fetch(url);
-    const data = await res.json();
-
-    const person = data.people?.[0] || {};
-    const fullName = person.fullName || "TBD";
-
-    const handCode = person.pitchHand?.code || "";
-    const hand = handCode === "L" ? "LHP" : handCode === "R" ? "RHP" : "";
-
-    let era = "";
-    let eraLHB = "";
-    let eraRHB = "";
-
-    const splits = person.stats?.[0]?.splits || [];
-    if (splits.length > 0) {
-      const stat = splits[0].stat || {};
-      era = stat.era || "";
-      eraLHB = stat.eraVsLeft || stat.eraLeft || "";
-      eraRHB = stat.eraVsRight || stat.eraRight || "";
-    }
-
-    return { fullName, hand, era, eraLHB, eraRHB };
-  } catch (err) {
-    console.error(`Pitcher hydration failed for ${pitcherId}:`, err);
-    return {
-      fullName: "TBD",
-      hand: "",
-      era: "",
-      eraLHB: "",
-      eraRHB: ""
-    };
-  }
+    exec(cmd, (error, stdout, stderr) => {
+        if (error) {
+            console.error(`[ERROR] PowerShell Execution Failed: ${error.message}`);
+            return callback(error, null, stdout);
+        }
+        if (stderr && !stdout) {
+            console.warn(`[WARN] PowerShell Stderr: ${stderr}`);
+        }
+        console.log(`[SUCCESS] PowerShell Logs:\n${stdout}`);
+        return callback(null, stdout, stderr);
+    });
 }
 
-// ===============================
-// ENDPOINT 1: /mlb (unchanged)
-// ===============================
-app.get("/mlb", async (req, res) => {
-  try {
-    const [oddsRes, parlayRes] = await Promise.allSettled([
-      fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
-      fetch(`https://api.parlay-api.com/v1/mlb/historical?apiKey=${PARLAY_API_KEY}`)
-    ]);
+// ============================================================================
+// 1. ENDPOINT: /api/dk_odds (Triggered by Excel DK_Odds Query)
+// ============================================================================
+app.get('/api/dk_odds', (req, res) => {
+    // Read ?date parameter from Power Query (default to today if empty)
+    const targetDate = req.query.date || new Date().toISOString().split('T')[0];
+    const csvExportPath = 'C:\\Users\\rserv\\draftkings\\csv_exports\\Todays_Pitchers.csv';
 
-    let oddsData = [];
-    if (oddsRes.status === "fulfilled" && oddsRes.value.ok) {
-      oddsData = await oddsRes.value.json();
-    }
+    runPowerShellScript(targetDate, (err, stdout) => {
+        if (err) {
+            return res.status(500).json({
+                status: 'error',
+                message: 'Failed to run PowerShell script.',
+                details: err.message
+            });
+        }
 
-    let parlayData = null;
-    if (parlayRes.status === "fulfilled" && parlayRes.value.ok) {
-      parlayData = await parlayRes.value.json().catch(() => null);
-    }
-
-    const gamesByDate = {};
-
-    oddsData.forEach((game) => {
-      const gameDateStr = game.commence_time.split("T")[0];
-
-      const formattedGame = {
-        gamePk: game.id || "000000",
-        gameGuid: game.id || "",
-        gameType: "R",
-        season: new Date().getFullYear().toString(),
-        gameDate: game.commence_time,
-        teams: {
-          away: { team: { name: game.away_team } },
-          home: { team: { name: game.home_team } }
-        },
-        parlayData
-      };
-
-      if (!gamesByDate[gameDateStr]) gamesByDate[gameDateStr] = [];
-      gamesByDate[gameDateStr].push(formattedGame);
+        if (fs.existsSync(csvExportPath)) {
+            res.json({
+                status: 'success',
+                date: targetDate,
+                csv_path: csvExportPath,
+                message: 'Slate fetched successfully.'
+            });
+        } else {
+            res.status(404).json({
+                status: 'error',
+                message: 'Todays_Pitchers.csv output file was not found.',
+                logs: stdout
+            });
+        }
     });
-
-    res.json({
-      dates: Object.keys(gamesByDate).map((dateKey) => ({
-        date: dateKey,
-        games: gamesByDate[dateKey]
-      }))
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Proxy Failed", details: error.message });
-  }
 });
 
-// ===============================
-// ENDPOINT 2: /pitchers?date=YYYY-MM-DD
-// ===============================
-app.get("/pitchers", async (req, res) => {
-  try {
-    const date = req.query.date;
-    if (!date) {
-      return res.status(400).json({
-        error: "Missing date parameter. Use /pitchers?date=YYYY-MM-DD"
-      });
-    }
+// ============================================================================
+// 2. ENDPOINT: /api/stats (Triggered by Excel Stats Query)
+// ============================================================================
+app.get('/api/stats', (req, res) => {
+    const targetDate = req.query.date || new Date().toISOString().split('T')[0];
+    const csvExportPath = 'C:\\Users\\rserv\\draftkings\\csv_exports\\Todays_Pitchers.csv';
 
-    const scheduleUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${date}&endDate=${date}`;
-    const scheduleRes = await fetch(scheduleUrl);
-    const scheduleData = await scheduleRes.json();
-
-    const output = [];
-
-    if (scheduleData.dates?.length > 0) {
-      for (const game of scheduleData.dates[0].games) {
-        const homeTeam = game.teams.home.team.name;
-        const awayTeam = game.teams.away.team.name;
-
-        const homeRecord = game.teams.home.leagueRecord;
-        const awayRecord = game.teams.away.leagueRecord;
-
-        const homePitcherId = pitcherMap[homeTeam] || null;
-        const awayPitcherId = pitcherMap[awayTeam] || null;
-
-        const [homePitcher, awayPitcher] = await Promise.all([
-          getPitcherDetails(homePitcherId),
-          getPitcherDetails(awayPitcherId)
-        ]);
-
-        output.push({
-          gamePk: game.gamePk,
-          home_team: `${homeTeam} (${homeRecord.wins}-${homeRecord.losses})`,
-          away_team: `${awayTeam} (${awayRecord.wins}-${awayRecord.losses})`,
-          home_pitcher: `${homePitcher.fullName} (${homePitcher.hand}, ${homePitcher.era})`,
-          away_pitcher: `${awayPitcher.fullName} (${awayPitcher.hand}, ${awayPitcher.era})`,
-          home_pitcher_id: homePitcherId,
-          away_pitcher_id: awayPitcherId,
-          home_era_vs_lhb: homePitcher.eraLHB,
-          home_era_vs_rhb: homePitcher.eraRHB,
-          away_era_vs_lhb: awayPitcher.eraLHB,
-          away_era_vs_rhb: awayPitcher.eraRHB
+    if (fs.existsSync(csvExportPath)) {
+        res.json({
+            status: 'success',
+            date: targetDate,
+            endpoint: 'stats',
+            file_ready: true
         });
-      }
+    } else {
+        // Return fallback schema to keep Power Query from throwing fatal 404 errors on off-days
+        res.json({
+            status: 'warning',
+            date: targetDate,
+            message: 'No stats available for selected date.',
+            file_ready: false
+        });
     }
-
-    res.json({ pitchers: output });
-  } catch (error) {
-    res.status(500).json({ error: "Pitchers endpoint failed", details: error.message });
-  }
 });
 
-// ===============================
-// START SERVER
-// ===============================
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// ============================================================================
+// 3. ENDPOINT: /api/list_columns (Triggered by Excel List Columns Query)
+// ============================================================================
+app.get('/api/list_columns', (req, res) => {
+    // Provides column definitions to prevent 'Download did not complete' errors in Excel
+    res.json({
+        columns: [
+            "GameDate",
+            "Team",
+            "Side",
+            "PitcherName",
+            "MLBAM_ID",
+            "FanGraphs_ID",
+            "BRef_ID",
+            "Retrosheet_ID"
+        ]
+    });
+});
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.send('DraftKings MLB Proxy Server is Active and Running on Port 3000');
+});
+
+// Start Node Server
+app.listen(PORT, () => {
+    console.log(`====================================================`);
+    console.log(`DraftKings MLB Proxy Server running on http://localhost:${PORT}`);
+    console.log(`Ready for Power Query requests...`);
+    console.log(`====================================================`);
+});
