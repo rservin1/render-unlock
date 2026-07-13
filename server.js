@@ -1,34 +1,60 @@
+// ==========================================
+// ENDPOINT 1: LIVE SCORES + REAL ODDS (/mlb)
+// ==========================================
 app.get("/mlb", async (req, res) => {
   try {
-    const oddsUrl = `https://api.parlay-api.com/v1/sports/baseball_mlb/odds?apiKey=${PARLAY_API_KEY}`;
-    const oddsRes = await fetch(oddsUrl);
-    const oddsJson = await oddsRes.json();
+    const [scoresRes, oddsRes, mlbMapRes] = await Promise.allSettled([
+      fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`),
+      fetch(`https://api.parlay-api.com/v1/sports/baseball_mlb/odds?apiKey=${PARLAY_API_KEY}`),
+      getMlbScheduleMap()
+    ]);
 
-    if (!Array.isArray(oddsJson)) {
-      console.error("Unexpected odds format:", oddsJson);
-      return res.status(500).json({
-        error: "MLB endpoint failed",
-        details: "ParlayAPI returned unexpected odds format"
-      });
+    // SCORES
+    let scoresData = [];
+    if (scoresRes.status === "fulfilled" && scoresRes.value.ok) {
+      scoresData = await scoresRes.value.json();
     }
 
-    const mlbMap = await getMlbScheduleMap();
+    // ODDS
+    let oddsData = [];
+    if (oddsRes.status === "fulfilled" && oddsRes.value.ok) {
+      oddsData = await oddsRes.value.json();
+    }
+
+    const mlbMap = mlbMapRes.status === "fulfilled" ? mlbMapRes.value : {};
+
     const gamesByDate = {};
 
-    oddsJson.forEach((game) => {
+    scoresData.forEach((game) => {
       const dateStr = game.commence_time.split("T")[0];
 
       const homeTeam = game.home_team;
       const awayTeam = game.away_team;
 
-      const normHome = normalizeName(homeTeam);
-      const mlb = mlbMap[normHome] || {};
+      // Scores
+      let homeScore = 0;
+      let awayScore = 0;
+
+      if (Array.isArray(game.scores)) {
+        const homeObj = game.scores.find((s) => s.name === homeTeam);
+        const awayObj = game.scores.find((s) => s.name === awayTeam);
+
+        homeScore = parseInt(homeObj?.score || 0);
+        awayScore = parseInt(awayObj?.score || 0);
+      }
+
+      // Odds match
+      const oddsMatch = oddsData.find(
+        (o) =>
+          o.home_team === homeTeam &&
+          o.away_team === awayTeam
+      );
 
       let dk = null;
       let mgm = null;
 
-      if (Array.isArray(game.bookmakers)) {
-        game.bookmakers.forEach((bk) => {
+      if (oddsMatch && Array.isArray(oddsMatch.bookmakers)) {
+        oddsMatch.bookmakers.forEach((bk) => {
           const key = bk.key.toLowerCase();
           if (key.includes("draftkings")) dk = bk;
           if (key.includes("betmgm") || key.includes("mgm")) mgm = bk;
@@ -57,9 +83,12 @@ app.get("/mlb", async (req, res) => {
       const dkData = extractMarkets(dk);
       const mgmData = extractMarkets(mgm);
 
+      const normHome = normalizeName(homeTeam);
+      const mlb = mlbMap[normHome] || {};
+
       const formattedGame = {
-        gamePk: mlb.gamePk || game.gameId || "",
-        gameGuid: game.gameId || "",
+        gamePk: mlb.gamePk || game.id || "",
+        gameGuid: game.id || "",
         gameType: "R",
         season: new Date().getFullYear().toString(),
         gameDate: game.commence_time,
@@ -72,13 +101,13 @@ app.get("/mlb", async (req, res) => {
 
         teams: {
           away: {
-            score: 0,
-            isWinner: false,
+            score: awayScore,
+            isWinner: awayScore > homeScore,
             team: { id: awayTeam, name: awayTeam }
           },
           home: {
-            score: 0,
-            isWinner: false,
+            score: homeScore,
+            isWinner: homeScore > awayScore,
             team: { id: homeTeam, name: homeTeam }
           }
         },
@@ -88,23 +117,9 @@ app.get("/mlb", async (req, res) => {
           name: `${homeTeam} Stadium`
         },
 
-        home_pitcher_id: mlb.homePitcherId || null,
-        away_pitcher_id: mlb.awayPitcherId || null,
-
-        parlayData: {
-          draftkings_ml_away: dkData.mlAway,
-          draftkings_ml_home: dkData.mlHome,
-          draftkings_spread_away: dkData.spreadAway,
-          draftkings_spread_home: dkData.spreadHome,
-          draftkings_total_over: dkData.totalOver,
-          draftkings_total_under: dkData.totalUnder,
-
-          mgm_ml_away: mgmData.mlAway,
-          mgm_ml_home: mgmData.mlHome,
-          mgm_spread_away: mgmData.spreadAway,
-          mgm_spread_home: mgmData.spreadHome,
-          mgm_total_over: mgmData.totalOver,
-          mgm_total_under: mgmData.totalUnder
+        odds: {
+          draftkings: dkData,
+          mgm: mgmData
         }
       };
 
