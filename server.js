@@ -75,7 +75,27 @@ async function getPitcherDetails(pitcherId) {
 }
 
 // ===============================
-// ENDPOINT: /mlb (FULLY SAFE VERSION)
+// DEBUG ENDPOINT — shows ParlayAPI format
+// ===============================
+app.get("/debug-odds", async (req, res) => {
+  try {
+    const oddsUrl = `https://api.parlay-api.com/v1/sports/baseball_mlb/live/points?apiKey=${PARLAY_API_KEY}`;
+    const oddsRes = await fetch(oddsUrl);
+    const oddsJson = await oddsRes.json();
+
+    res.json({
+      typeof: typeof oddsJson,
+      isArray: Array.isArray(oddsJson),
+      keys: Object.keys(oddsJson || {}),
+      sample: oddsJson
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+// ===============================
+// ENDPOINT: /mlb (SAFE VERSION)
 // ===============================
 app.get("/mlb", async (req, res) => {
   try {
@@ -83,7 +103,6 @@ app.get("/mlb", async (req, res) => {
     const oddsRes = await fetch(oddsUrl);
     const oddsJson = await oddsRes.json();
 
-    // SAFETY: Normalize ParlayAPI response into an array
     let games = [];
 
     if (Array.isArray(oddsJson)) {
