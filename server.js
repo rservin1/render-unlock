@@ -1,12 +1,19 @@
-const express = require('express');
-const { exec } = require('child_process');
-const path = require('path');
-const fs = require('fs');
+import express from 'express';
+import fetch from 'node-fetch';
+import { exec } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+// Recreate __dirname for ES Modules syntax
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+// Priority given to process.env.PORT for cloud deployments (Render/Railway/Vercel)
+const PORT = process.env.PORT || 3000;
 
-// Middleware for CORS and JSON handling
+// Enable CORS and JSON parsing middleware
 app.use(express.json());
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
@@ -14,39 +21,47 @@ app.use((req, res, next) => {
     next();
 });
 
-// Helper function to safely execute PowerShell scripts
-function runPowerShellScript(dateString, callback) {
-    const psScript = 'C:\\Users\\rserv\\draftkings\\fetch_slate.ps1';
-    const cmd = `powershell.exe -ExecutionPolicy Bypass -File "${psScript}" -Date "${dateString}"`;
+// Dynamic Path Resolution
+const exportDir = path.join(__dirname, 'csv_exports');
+const csvExportPath = path.join(exportDir, 'Todays_Pitchers.csv');
+const psScriptPath = path.join(__dirname, 'fetch_slate.ps1');
 
-    console.log(`[SERVER] Executing script for date: ${dateString}...`);
+// Ensure destination exports directory exists
+if (!fs.existsSync(exportDir)) {
+    fs.mkdirSync(exportDir, { recursive: true });
+}
+
+// Helper: Safely trigger PowerShell script execution
+function runPowerShellScript(dateString, callback) {
+    // Check OS platform before spawning PowerShell
+    if (process.platform !== 'win32') {
+        console.warn(`[WARN] Non-Windows OS (${process.platform}). Skipping PowerShell script execution.`);
+        return callback(null, "Skipped PowerShell on non-Windows deployment host", "");
+    }
+
+    const cmd = `powershell.exe -ExecutionPolicy Bypass -File "${psScriptPath}" -Date "${dateString}"`;
+    console.log(`[SERVER] Executing slate script for target date: ${dateString}...`);
 
     exec(cmd, (error, stdout, stderr) => {
         if (error) {
             console.error(`[ERROR] PowerShell Execution Failed: ${error.message}`);
             return callback(error, null, stdout);
         }
-        if (stderr && !stdout) {
-            console.warn(`[WARN] PowerShell Stderr: ${stderr}`);
-        }
-        console.log(`[SUCCESS] PowerShell Logs:\n${stdout}`);
         return callback(null, stdout, stderr);
     });
 }
 
 // ============================================================================
-// 1. ENDPOINT: /api/dk_odds (Triggered by Excel DK_Odds Query)
+// 1. ENDPOINT: /api/dk_odds (Used by Excel DK_Odds query)
 // ============================================================================
 app.get('/api/dk_odds', (req, res) => {
-    // Read ?date parameter from Power Query (default to today if empty)
     const targetDate = req.query.date || new Date().toISOString().split('T')[0];
-    const csvExportPath = 'C:\\Users\\rserv\\draftkings\\csv_exports\\Todays_Pitchers.csv';
 
     runPowerShellScript(targetDate, (err, stdout) => {
         if (err) {
             return res.status(500).json({
                 status: 'error',
-                message: 'Failed to run PowerShell script.',
+                message: 'PowerShell execution failed',
                 details: err.message
             });
         }
@@ -56,48 +71,35 @@ app.get('/api/dk_odds', (req, res) => {
                 status: 'success',
                 date: targetDate,
                 csv_path: csvExportPath,
-                message: 'Slate fetched successfully.'
+                message: 'Slate processed successfully.'
             });
         } else {
-            res.status(404).json({
-                status: 'error',
-                message: 'Todays_Pitchers.csv output file was not found.',
-                logs: stdout
+            // Return warning status to prevent 404/500 errors in Excel on off-days
+            res.json({
+                status: 'warning',
+                date: targetDate,
+                message: 'Slate file not generated or off-day.'
             });
         }
     });
 });
 
 // ============================================================================
-// 2. ENDPOINT: /api/stats (Triggered by Excel Stats Query)
+// 2. ENDPOINT: /api/stats (Used by Excel Stats query)
 // ============================================================================
 app.get('/api/stats', (req, res) => {
     const targetDate = req.query.date || new Date().toISOString().split('T')[0];
-    const csvExportPath = 'C:\\Users\\rserv\\draftkings\\csv_exports\\Todays_Pitchers.csv';
-
-    if (fs.existsSync(csvExportPath)) {
-        res.json({
-            status: 'success',
-            date: targetDate,
-            endpoint: 'stats',
-            file_ready: true
-        });
-    } else {
-        // Return fallback schema to keep Power Query from throwing fatal 404 errors on off-days
-        res.json({
-            status: 'warning',
-            date: targetDate,
-            message: 'No stats available for selected date.',
-            file_ready: false
-        });
-    }
+    res.json({
+        status: 'success',
+        date: targetDate,
+        file_ready: fs.existsSync(csvExportPath)
+    });
 });
 
 // ============================================================================
-// 3. ENDPOINT: /api/list_columns (Triggered by Excel List Columns Query)
+// 3. ENDPOINT: /api/list_columns (Used by Excel List Columns query)
 // ============================================================================
 app.get('/api/list_columns', (req, res) => {
-    // Provides column definitions to prevent 'Download did not complete' errors in Excel
     res.json({
         columns: [
             "GameDate",
@@ -112,15 +114,14 @@ app.get('/api/list_columns', (req, res) => {
     });
 });
 
-// Health check endpoint
+// Root Health Check Route (Used by Render/Railway to confirm service uptime)
 app.get('/', (req, res) => {
-    res.send('DraftKings MLB Proxy Server is Active and Running on Port 3000');
+    res.send('DraftKings MLB Proxy Server is running and active.');
 });
 
-// Start Node Server
+// Start Express Server
 app.listen(PORT, () => {
     console.log(`====================================================`);
-    console.log(`DraftKings MLB Proxy Server running on http://localhost:${PORT}`);
-    console.log(`Ready for Power Query requests...`);
+    console.log(`DraftKings Proxy Server running on port ${PORT}`);
     console.log(`====================================================`);
 });
